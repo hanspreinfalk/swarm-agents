@@ -96,6 +96,48 @@ if __name__ == "__main__":
     build()
 `,
   },
+  "tools/deploy.py": {
+    language: "python",
+    content: `"""Deploy helpers (demo)."""
+
+
+def main() -> None:
+    print("deploy: stub")
+
+
+if __name__ == "__main__":
+    main()
+`,
+  },
+  "src/components/Header.tsx": {
+    language: "typescript",
+    content: `export function Header() {
+  return <header className="site-header">Header</header>;
+}
+`,
+  },
+  "src/components/Footer.tsx": {
+    language: "typescript",
+    content: `export function Footer() {
+  return <footer className="site-footer">Footer</footer>;
+}
+`,
+  },
+  "src/components/HeroBullets.tsx": {
+    language: "typescript",
+    content: `import { heroBullets } from "../hero";
+
+export function HeroBullets() {
+  return (
+    <ul>
+      {heroBullets.map((b) => (
+        <li key={b}>{b}</li>
+      ))}
+    </ul>
+  );
+}
+`,
+  },
   "src/App.tsx": {
     language: "typescript",
     content: `import { HeroSection } from "./hero";

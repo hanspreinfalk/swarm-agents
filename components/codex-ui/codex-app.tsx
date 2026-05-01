@@ -33,7 +33,8 @@ import {
   RefreshCwIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -41,7 +42,15 @@ import { AppSidebar } from "./app-sidebar";
 import { ChatPanel } from "./chat-panel";
 import { CommitDialog } from "./commit-dialog";
 import { CodePanel } from "./code-panel";
-import type { AssistantMessage, ChatMessage, UserMessage } from "./types";
+import { CODE_FILES } from "./data";
+import type { AssistantMessage, ChatMessage, CodeFile, UserMessage } from "./types";
+import {
+  fileCreateConflict,
+  folderCreateConflict,
+  inferLanguage,
+  joinPath,
+  parentDirOf,
+} from "./virtual-file-tree";
 
 const REPOSITORIES = [
   "hanspreinfalk/swarm-agents",
@@ -147,6 +156,31 @@ export function CodexApp() {
   const createThreadMutation = useMutation(api.threads.createThread);
   const addMessageMutation = useMutation(api.threads.addMessage);
   const updateThreadMutation = useMutation(api.threads.updateThread);
+  const deleteThreadMutation = useMutation(api.threads.deleteThread);
+  const deleteAssistantMessageMutation = useMutation(api.threads.deleteAssistantMessage);
+  const setMessageSentimentMutation = useMutation(api.likedMessages.setSentiment);
+
+  const likedMessagesQuery = useQuery(
+    api.likedMessages.listForThread,
+    activeThreadId ? { threadId: activeThreadId as Id<"threads"> } : "skip"
+  );
+  const likedRows = likedMessagesQuery ?? [];
+
+  const feedbackByMessageId = useMemo(() => {
+    const map = new Map<string, "up" | "down">();
+    for (const row of likedRows) {
+      map.set(row.messageId, row.sentiment);
+    }
+    return map;
+  }, [likedRows]);
+
+  const lastAssistantMessageId = useMemo(() => {
+    for (let i = dbMessages.length - 1; i >= 0; i--) {
+      const m = dbMessages[i];
+      if (m.role === "assistant") return m._id;
+    }
+    return null;
+  }, [dbMessages]);
 
   // ── Streaming state ──────────────────────────────────────────────
   const [isStreaming, setIsStreaming] = useState(false);
@@ -158,6 +192,207 @@ export function CodexApp() {
 
   // ── UI state ─────────────────────────────────────────────────────
   const [activeFile, setActiveFile] = useState("src/hero.tsx");
+  const [codeFiles, setCodeFiles] = useState<Record<string, CodeFile>>(() => ({
+    ...CODE_FILES,
+  }));
+  const [emptyFolders, setEmptyFolders] = useState<Set<string>>(() => new Set());
+
+  const handleCodeFileChange = useCallback((path: string, content: string) => {
+    setCodeFiles((prev) => {
+      const cur = prev[path];
+      if (!cur) return prev;
+      return { ...prev, [path]: { ...cur, content } };
+    });
+  }, []);
+
+  const handleAddFile = useCallback(
+    (parentDir: string, name: string): boolean => {
+      const path = joinPath(parentDir, name);
+      const err = fileCreateConflict(path, codeFiles, emptyFolders);
+      if (err) {
+        toast.error(err);
+        return false;
+      }
+      setCodeFiles((prev) => ({
+        ...prev,
+        [path]: { content: "", language: inferLanguage(path) },
+      }));
+      setEmptyFolders((prev) => {
+        const n = new Set(prev);
+        if (parentDir) n.delete(parentDir);
+        return n;
+      });
+      setActiveFile(path);
+      return true;
+    },
+    [codeFiles, emptyFolders]
+  );
+
+  const handleAddFolder = useCallback(
+    (parentDir: string, name: string): boolean => {
+      const path = joinPath(parentDir, name);
+      const err = folderCreateConflict(path, codeFiles, emptyFolders);
+      if (err) {
+        toast.error(err);
+        return false;
+      }
+      setEmptyFolders((prev) => new Set(prev).add(path));
+      return true;
+    },
+    [codeFiles, emptyFolders]
+  );
+
+  const handleDeletePath = useCallback((path: string, kind: "file" | "folder") => {
+    if (kind === "file") {
+      let fallback = "";
+      setCodeFiles((prev) => {
+        const next = { ...prev };
+        delete next[path];
+        fallback = Object.keys(next).sort()[0] ?? "";
+        return next;
+      });
+      setEmptyFolders((prev) => {
+        const n = new Set(prev);
+        n.delete(path);
+        return n;
+      });
+      setActiveFile((ac) => (ac === path ? fallback : ac));
+      return;
+    }
+    let fallback = "";
+    setCodeFiles((prev) => {
+      const next = { ...prev };
+      for (const k of Object.keys(next)) {
+        if (k.startsWith(path + "/")) delete next[k];
+      }
+      fallback = Object.keys(next).sort()[0] ?? "";
+      return next;
+    });
+    setEmptyFolders((prev) => {
+      const n = new Set<string>();
+      for (const f of prev) {
+        if (f === path || f.startsWith(path + "/")) continue;
+        n.add(f);
+      }
+      return n;
+    });
+    setActiveFile((ac) => {
+      if (ac === path || ac.startsWith(path + "/")) return fallback;
+      return ac;
+    });
+  }, []);
+
+  const handleRenamePath = useCallback(
+    (path: string, newBaseName: string, kind: "file" | "folder"): boolean => {
+      const trimmed = newBaseName.trim();
+      if (!trimmed || trimmed.includes("/")) {
+        toast.error("Invalid name.");
+        return false;
+      }
+
+      if (kind === "file") {
+        const parent = parentDirOf(path);
+        const newPath = joinPath(parent, trimmed);
+        if (newPath === path) return true;
+        const err = fileCreateConflict(newPath, codeFiles, emptyFolders);
+        if (err) {
+          toast.error(err);
+          return false;
+        }
+        const cur = codeFiles[path];
+        if (!cur) {
+          toast.error("File not found.");
+          return false;
+        }
+        setCodeFiles((prev) => {
+          const next = { ...prev };
+          delete next[path];
+          next[newPath] = cur;
+          return next;
+        });
+        setActiveFile((ac) => (ac === path ? newPath : ac));
+        return true;
+      }
+
+      const parent = parentDirOf(path);
+      const newPath = joinPath(parent, trimmed);
+      if (newPath === path) return true;
+
+      if (newPath.startsWith(path + "/") || path.startsWith(newPath + "/")) {
+        toast.error("Cannot move a folder into itself.");
+        return false;
+      }
+
+      const keys = Object.keys(codeFiles);
+      const moves = keys
+        .filter((k) => k.startsWith(path + "/"))
+        .map((from) => ({ from, to: newPath + from.slice(path.length) }));
+
+      for (const { to } of moves) {
+        if (codeFiles[to] !== undefined && !moves.some((m) => m.from === to)) {
+          toast.error(`Cannot rename: “${to}” already exists.`);
+          return false;
+        }
+      }
+
+      if (codeFiles[newPath] !== undefined && !moves.some((m) => m.to === newPath)) {
+        toast.error(`A file is in the way: “${newPath}”.`);
+        return false;
+      }
+
+      const emptyMoves = [...emptyFolders]
+        .filter((f) => f === path || f.startsWith(path + "/"))
+        .map((from) => ({
+          from,
+          to: from === path ? newPath : newPath + from.slice(path.length),
+        }));
+
+      const emptyDestCounts = new Map<string, number>();
+      for (const { to } of emptyMoves) {
+        emptyDestCounts.set(to, (emptyDestCounts.get(to) ?? 0) + 1);
+      }
+      for (const [, count] of emptyDestCounts) {
+        if (count > 1) {
+          toast.error("That rename would merge two folders with the same path.");
+          return false;
+        }
+      }
+
+      const emptyFromSet = new Set(emptyMoves.map((m) => m.from));
+      for (const { to } of emptyMoves) {
+        if (emptyFolders.has(to) && !emptyFromSet.has(to)) {
+          toast.error(`Folder “${to}” already exists.`);
+          return false;
+        }
+      }
+
+      setCodeFiles((prev) => {
+        const next = { ...prev };
+        for (const { from } of moves) delete next[from];
+        for (const { from, to } of moves) next[to] = prev[from];
+        return next;
+      });
+
+      setEmptyFolders((prev) => {
+        const n = new Set<string>();
+        for (const f of prev) {
+          if (f === path || f.startsWith(path + "/")) continue;
+          n.add(f);
+        }
+        for (const { to } of emptyMoves) n.add(to);
+        return n;
+      });
+
+      setActiveFile((ac) => {
+        if (ac === path) return newPath;
+        if (ac.startsWith(path + "/")) return newPath + ac.slice(path.length);
+        return ac;
+      });
+
+      return true;
+    },
+    [codeFiles, emptyFolders]
+  );
   const [commitDialogOpen, setCommitDialogOpen] = useState(false);
   const [selectedRepo, setSelectedRepo] = useState(REPOSITORIES[0]);
   const [selectedBranch, setSelectedBranch] = useState(BRANCHES[0]);
@@ -204,6 +439,8 @@ export function CodexApp() {
         isThinkingStreaming: false,
         text: m.content,
         tools: [],
+        feedback: feedbackByMessageId.get(m._id),
+        canRegenerate: m._id === lastAssistantMessageId,
       };
       return assistantMsg;
     }),
@@ -241,43 +478,39 @@ export function CodexApp() {
     abortControllerRef.current?.abort();
   }, []);
 
-  // ── Message submit + streaming ───────────────────────────────────
-  const handleSubmit = useCallback(
-    async (text: string) => {
-      if (!text.trim()) return;
-
-      let threadId = activeThreadId;
-
-      // Create thread if none is active
-      if (!threadId) {
-        threadId = await createThreadMutation({
-          title: text.slice(0, 60),
-          model: selectedModel,
-        });
-        setActiveThreadId(threadId);
-      } else if (dbMessages.length === 0) {
-        // Update thread title from first message
-        await updateThreadMutation({
-          threadId: threadId as Id<"threads">,
-          title: text.slice(0, 60),
-          model: selectedModel,
-        });
-      }
-
-      // Save user message to Convex
-      await addMessageMutation({
+  const handleRenameThread = useCallback(
+    async (threadId: string, title: string) => {
+      const trimmed = title.trim();
+      await updateThreadMutation({
         threadId: threadId as Id<"threads">,
-        role: "user",
-        content: text,
+        title: trimmed.length > 0 ? trimmed : "Untitled",
       });
+    },
+    [updateThreadMutation]
+  );
 
-      // Build message history for the API
-      const apiMessages = [
-        ...dbMessages.map((m) => ({ role: m.role, content: m.content })),
-        { role: "user" as const, content: text },
-      ];
+  const handleDeleteThread = useCallback(
+    async (threadId: string) => {
+      const nextActiveId =
+        activeThreadId === threadId
+          ? (threads.find((t) => t._id !== threadId)?._id ?? null)
+          : activeThreadId;
+      await deleteThreadMutation({ threadId: threadId as Id<"threads"> });
+      if (activeThreadId === threadId) {
+        setActiveThreadId(nextActiveId);
+        setStreamingContent("");
+        setIsStreaming(false);
+        abortControllerRef.current?.abort();
+      }
+    },
+    [deleteThreadMutation, activeThreadId, threads]
+  );
 
-      // Start streaming
+  const streamAssistantReply = useCallback(
+    async (
+      threadId: Id<"threads">,
+      apiMessages: Array<{ role: "user" | "assistant"; content: string }>
+    ) => {
       setIsStreaming(true);
       setStreamingContent("");
 
@@ -308,21 +541,61 @@ export function CodexApp() {
           setStreamingContent(fullContent);
         }
 
-        // Save completed AI message to Convex
         await addMessageMutation({
-          threadId: threadId as Id<"threads">,
+          threadId,
           role: "assistant",
           content: fullContent,
         });
       } catch (err) {
         if ((err as Error).name !== "AbortError") {
           console.error("Streaming error:", err);
+          toast.error("The assistant could not finish this reply. Try again.");
         }
       } finally {
         setIsStreaming(false);
         setStreamingContent("");
         abortControllerRef.current = null;
       }
+    },
+    [addMessageMutation, selectedModel]
+  );
+
+  // ── Message submit + streaming ───────────────────────────────────
+  const handleSubmit = useCallback(
+    async (text: string) => {
+      if (!text.trim()) return;
+
+      let threadId = activeThreadId;
+
+      // Create thread if none is active
+      if (!threadId) {
+        threadId = await createThreadMutation({
+          title: text.slice(0, 60),
+          model: selectedModel,
+        });
+        setActiveThreadId(threadId);
+      } else if (dbMessages.length === 0) {
+        // Update thread title from first message
+        await updateThreadMutation({
+          threadId: threadId as Id<"threads">,
+          title: text.slice(0, 60),
+          model: selectedModel,
+        });
+      }
+
+      // Save user message to Convex
+      await addMessageMutation({
+        threadId: threadId as Id<"threads">,
+        role: "user",
+        content: text,
+      });
+
+      const apiMessages = [
+        ...dbMessages.map((m) => ({ role: m.role, content: m.content })),
+        { role: "user" as const, content: text },
+      ];
+
+      await streamAssistantReply(threadId as Id<"threads">, apiMessages);
     },
     [
       activeThreadId,
@@ -331,6 +604,69 @@ export function CodexApp() {
       createThreadMutation,
       addMessageMutation,
       updateThreadMutation,
+      streamAssistantReply,
+    ]
+  );
+
+  const handleCopyAssistantText = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Copied to clipboard", { duration: 3500 });
+    } catch {
+      toast.error("Could not copy to clipboard", { duration: 4000 });
+    }
+  }, []);
+
+  const handleFeedback = useCallback(
+    async (messageId: string, sentiment: "up" | "down") => {
+      try {
+        await setMessageSentimentMutation({
+          messageId: messageId as Id<"messages">,
+          sentiment,
+        });
+      } catch {
+        toast.error("Could not save feedback");
+      }
+    },
+    [setMessageSentimentMutation]
+  );
+
+  const handleRegenerate = useCallback(
+    async (messageId: string) => {
+      if (!activeThreadId || isStreaming) return;
+      const idx = dbMessages.findIndex((m) => m._id === messageId);
+      if (idx < 0) return;
+      const target = dbMessages[idx];
+      if (target.role !== "assistant") return;
+      if (idx !== dbMessages.length - 1) {
+        toast.error("Only the latest assistant reply can be regenerated.");
+        return;
+      }
+      const prev = dbMessages[idx - 1];
+      if (!prev || prev.role !== "user") {
+        toast.error("Nothing to regenerate from.");
+        return;
+      }
+      const apiMessages = dbMessages.slice(0, idx).map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
+      try {
+        await deleteAssistantMessageMutation({
+          messageId: messageId as Id<"messages">,
+        });
+      } catch {
+        toast.error("Could not remove the old reply.");
+        return;
+      }
+      await streamAssistantReply(activeThreadId as Id<"threads">, apiMessages);
+    },
+    [
+      activeThreadId,
+      dbMessages,
+      deleteAssistantMessageMutation,
+      isStreaming,
+      streamAssistantReply,
     ]
   );
 
@@ -445,6 +781,8 @@ export function CodexApp() {
           threads={threads}
           onSelectThread={handleSelectThread}
           onNewThread={handleNewThread}
+          onRenameThread={handleRenameThread}
+          onDeleteThread={handleDeleteThread}
         />
 
         <SidebarInset
@@ -553,6 +891,9 @@ export function CodexApp() {
                 onModelChange={setSelectedModel}
                 onSubmit={handleSubmit}
                 onStopAgent={handleStopAgent}
+                onCopyAssistantText={handleCopyAssistantText}
+                onRegenerate={handleRegenerate}
+                onFeedback={handleFeedback}
               />
             </div>
 
@@ -579,8 +920,15 @@ export function CodexApp() {
             >
               <CodePanel
                 activeFile={activeFile}
-                isTerminalVisible={isTerminalVisible}
+                codeFiles={codeFiles}
+                emptyFolders={emptyFolders}
                 onSelectFile={setActiveFile}
+                onCodeFileChange={handleCodeFileChange}
+                onAddFile={handleAddFile}
+                onAddFolder={handleAddFolder}
+                onDeletePath={handleDeletePath}
+                onRenamePath={handleRenamePath}
+                isTerminalVisible={isTerminalVisible}
                 onToggleTerminal={() => setIsTerminalVisible((visible) => !visible)}
               />
 

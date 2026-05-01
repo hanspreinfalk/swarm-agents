@@ -60,7 +60,7 @@ import {
   ThumbsUpIcon,
   XIcon,
 } from "lucide-react";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { ModelSelectorInput_ } from "./model-selector-input";
 import type {
   AssistantMessage,
@@ -433,6 +433,9 @@ interface ChatPanelProps {
   onModelChange: (model: string) => void;
   onSubmit: (text: string) => void;
   onStopAgent: (messageId: string, agentId: string) => void;
+  onCopyAssistantText: (text: string) => void;
+  onRegenerate: (messageId: string) => void;
+  onFeedback: (messageId: string, sentiment: "up" | "down") => void;
 }
 
 export function ChatPanel({
@@ -443,7 +446,11 @@ export function ChatPanel({
   onModelChange,
   onSubmit,
   onStopAgent,
+  onCopyAssistantText,
+  onRegenerate,
+  onFeedback,
 }: ChatPanelProps) {
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const handleSubmit = useCallback(
     ({ text }: { text: string; files: unknown[] }) => {
       if (text.trim()) onSubmit(text);
@@ -527,27 +534,46 @@ export function ChatPanel({
 
                 {!a.isThinkingStreaming && a.id !== "streaming" && (
                   <MessageActions>
-                    <MessageAction tooltip="Copy" size="icon-sm" variant="ghost">
+                    <MessageAction
+                      tooltip={copiedId === a.id ? "Copied" : "Copy"}
+                      size="icon-sm"
+                      variant={copiedId === a.id ? "secondary" : "ghost"}
+                      onClick={() => {
+                        onCopyAssistantText(a.text);
+                        setCopiedId(a.id);
+                        window.setTimeout(() => setCopiedId((id) => (id === a.id ? null : id)), 2000);
+                      }}
+                    >
                       <CopyIcon size={13} />
                     </MessageAction>
                     <MessageAction
-                      tooltip="Regenerate"
+                      tooltip={
+                        a.canRegenerate
+                          ? "Regenerate"
+                          : "Only the latest assistant reply can be regenerated"
+                      }
                       size="icon-sm"
                       variant="ghost"
+                      disabled={!a.canRegenerate || isStreaming}
+                      onClick={() => {
+                        if (a.canRegenerate && !isStreaming) onRegenerate(a.id);
+                      }}
                     >
                       <RefreshCwIcon size={13} />
                     </MessageAction>
                     <MessageAction
                       tooltip="Good response"
                       size="icon-sm"
-                      variant="ghost"
+                      variant={a.feedback === "up" ? "secondary" : "ghost"}
+                      onClick={() => onFeedback(a.id, "up")}
                     >
                       <ThumbsUpIcon size={13} />
                     </MessageAction>
                     <MessageAction
                       tooltip="Bad response"
                       size="icon-sm"
-                      variant="ghost"
+                      variant={a.feedback === "down" ? "secondary" : "ghost"}
+                      onClick={() => onFeedback(a.id, "down")}
                     >
                       <ThumbsDownIcon size={13} />
                     </MessageAction>

@@ -38,6 +38,10 @@ const FileTreeContext = createContext<FileTreeContextType>({
   togglePath: noop,
 });
 
+export function useFileTree(): FileTreeContextType {
+  return useContext(FileTreeContext);
+}
+
 export type FileTreeProps = Omit<HTMLAttributes<HTMLDivElement>, "onSelect"> & {
   expanded?: Set<string>;
   defaultExpanded?: Set<string>;

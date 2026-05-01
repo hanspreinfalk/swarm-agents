@@ -10,8 +10,8 @@ import {
 import { CheckIcon, FileIcon, TerminalIcon, XIcon } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
 import { CodeEditor } from "./code-editor";
-import { CODE_FILES } from "./data";
 import { FileExplorer } from "./file-explorer";
+import type { CodeFile } from "./types";
 
 const DIFF_STATS: Record<string, { added: number; removed: number }> = {
   "src/hero.tsx": { added: 8, removed: 5 },
@@ -20,19 +20,33 @@ const DIFF_STATS: Record<string, { added: number; removed: number }> = {
 
 interface CodePanelProps {
   activeFile: string;
-  isTerminalVisible: boolean;
+  codeFiles: Record<string, CodeFile>;
+  emptyFolders: Set<string>;
   onSelectFile: (file: string) => void;
+  onCodeFileChange: (path: string, content: string) => void;
+  onAddFile: (parentDir: string, name: string) => boolean;
+  onAddFolder: (parentDir: string, name: string) => boolean;
+  onDeletePath: (path: string, kind: "file" | "folder") => void;
+  onRenamePath: (path: string, newBaseName: string, kind: "file" | "folder") => boolean;
+  isTerminalVisible: boolean;
   onToggleTerminal: () => void;
 }
 
 export function CodePanel({
   activeFile,
-  isTerminalVisible,
+  codeFiles,
+  emptyFolders,
   onSelectFile,
+  onCodeFileChange,
+  onAddFile,
+  onAddFolder,
+  onDeletePath,
+  onRenamePath,
+  isTerminalVisible,
   onToggleTerminal,
 }: CodePanelProps) {
-  const currentFile = CODE_FILES[activeFile];
-  const stats = DIFF_STATS[activeFile];
+  const currentFile = activeFile ? codeFiles[activeFile] : undefined;
+  const stats = activeFile ? DIFF_STATS[activeFile] : undefined;
   const [fileTreeWidth, setFileTreeWidth] = useState(220);
   const [view, setView] = useState<"code" | "preview">("code");
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -170,7 +184,13 @@ export function CodePanel({
             <div style={{ minWidth: 0, minHeight: 0, overflow: "hidden" }}>
               <FileExplorer
                 activeFile={activeFile}
+                codeFiles={codeFiles}
+                emptyFolders={emptyFolders}
                 onSelectFile={onSelectFile}
+                onAddFile={onAddFile}
+                onAddFolder={onAddFolder}
+                onDeletePath={onDeletePath}
+                onRenamePath={onRenamePath}
               />
             </div>
 
@@ -233,11 +253,14 @@ export function CodePanel({
                       key={activeFile}
                       value={currentFile.content}
                       language={currentFile.language}
-                      readOnly
+                      onChange={(next) => onCodeFileChange(activeFile, next)}
+                      readOnly={false}
                     />
                   ) : (
-                    <div className="flex h-full items-center justify-center text-[13px] text-muted-foreground">
-                      Select a file to view
+                    <div className="flex h-full items-center justify-center px-4 text-center text-[13px] text-muted-foreground">
+                      {activeFile
+                        ? "This path is a folder. Select a file to edit."
+                        : "Select a file to view or create one from the explorer."}
                     </div>
                   )}
                 </div>

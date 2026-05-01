@@ -29,4 +29,15 @@ export default defineSchema({
     role: v.union(v.literal("user"), v.literal("assistant")),
     content: v.string(),
   }).index("by_thread", ["threadId"]),
+
+  // ── Per-user thumbs up/down on assistant messages ───────────────────────
+  likedMessages: defineTable({
+    userId: v.string(),
+    threadId: v.id("threads"),
+    messageId: v.id("messages"),
+    sentiment: v.union(v.literal("up"), v.literal("down")),
+  })
+    .index("by_thread_and_user", ["threadId", "userId"])
+    .index("by_message_and_user", ["messageId", "userId"])
+    .index("by_message", ["messageId"]),
 });

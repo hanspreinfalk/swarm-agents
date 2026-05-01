@@ -52,6 +52,10 @@ export interface AssistantMessage {
   text: string;
   tools: ToolEntry[];
   subAgents?: CodingAgentRun[];
+  /** Current user's thumbs feedback from `likedMessages`, if any */
+  feedback?: "up" | "down";
+  /** Only the latest persisted assistant turn can be regenerated */
+  canRegenerate?: boolean;
 }
 
 export type ChatMessage = UserMessage | AssistantMessage;
