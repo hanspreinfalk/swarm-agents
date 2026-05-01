@@ -486,7 +486,7 @@ export function ChatPanel({
                 How can SwarmAgents help?
               </p>
               <p className="mt-1 text-[13px] text-muted-foreground">
-                Ask anything — plan, implement, review, or ship software.
+                Ask anything. Plan, implement, review, or ship software.
               </p>
             </div>
           )}
