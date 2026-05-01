@@ -166,7 +166,8 @@ export const PARALLEL_CODING_AGENTS: CodingAgentRun[] = [
     task: "Audit current hero copy and CTAs",
     status: "done",
     progress: 100,
-    elapsed: "1m 12s",
+    durationSeconds: 72,
+    tokensUsed: 4280,
     files: ["src/hero.tsx"],
     updates: [
       "Read existing hero content",
@@ -187,7 +188,8 @@ export const PARALLEL_CODING_AGENTS: CodingAgentRun[] = [
     task: "Rewrite headline and supporting copy",
     status: "done",
     progress: 100,
-    elapsed: "1m 34s",
+    durationSeconds: 94,
+    tokensUsed: 5120,
     files: ["src/hero.tsx"],
     updates: [
       "Drafted launch headline",
@@ -208,7 +210,8 @@ export const PARALLEL_CODING_AGENTS: CodingAgentRun[] = [
     task: "Improve bullet point messaging",
     status: "done",
     progress: 100,
-    elapsed: "58s",
+    durationSeconds: 58,
+    tokensUsed: 3840,
     files: ["src/hero.tsx"],
     updates: [
       "Mapped bullets to product outcomes",
@@ -229,7 +232,8 @@ export const PARALLEL_CODING_AGENTS: CodingAgentRun[] = [
     task: "Check CTA labels and routes",
     status: "reviewing",
     progress: 82,
-    elapsed: "1m 48s",
+    durationSeconds: 108,
+    tokensUsed: 4680,
     files: ["src/hero.tsx", "src/App.tsx"],
     updates: [
       "Verified primary CTA intent",
@@ -250,7 +254,8 @@ export const PARALLEL_CODING_AGENTS: CodingAgentRun[] = [
     task: "Review build script impact",
     status: "running",
     progress: 68,
-    elapsed: "1m 05s",
+    durationSeconds: 65,
+    tokensUsed: 3260,
     files: ["tools/build.py"],
     updates: [
       "Read build script entrypoints",
@@ -271,7 +276,8 @@ export const PARALLEL_CODING_AGENTS: CodingAgentRun[] = [
     task: "Validate TypeScript shape",
     status: "running",
     progress: 61,
-    elapsed: "52s",
+    durationSeconds: 52,
+    tokensUsed: 3920,
     files: ["src/hero.tsx", "tsconfig.json"],
     updates: [
       "Checked exported object structure",
@@ -292,7 +298,8 @@ export const PARALLEL_CODING_AGENTS: CodingAgentRun[] = [
     task: "Inspect app integration",
     status: "running",
     progress: 47,
-    elapsed: "44s",
+    durationSeconds: 44,
+    tokensUsed: 3180,
     files: ["src/App.tsx"],
     updates: [
       "Found hero usage in app shell",
@@ -313,7 +320,8 @@ export const PARALLEL_CODING_AGENTS: CodingAgentRun[] = [
     task: "Look for stale messaging",
     status: "running",
     progress: 35,
-    elapsed: "39s",
+    durationSeconds: 39,
+    tokensUsed: 2860,
     files: ["package.json", "src/hero.tsx"],
     updates: [
       "Scanning package metadata",
@@ -334,7 +342,8 @@ export const PARALLEL_CODING_AGENTS: CodingAgentRun[] = [
     task: "Prepare review summary",
     status: "queued",
     progress: 12,
-    elapsed: "12s",
+    durationSeconds: 12,
+    tokensUsed: 1640,
     files: ["src/hero.tsx", "tools/build.py"],
     updates: [
       "Waiting for implementation agents",
@@ -355,7 +364,8 @@ export const PARALLEL_CODING_AGENTS: CodingAgentRun[] = [
     task: "Run final verification checklist",
     status: "queued",
     progress: 6,
-    elapsed: "8s",
+    durationSeconds: 8,
+    tokensUsed: 1320,
     files: ["tsconfig.json", "package.json"],
     updates: [
       "Waiting for review summary",

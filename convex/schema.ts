@@ -1,0 +1,32 @@
+import { defineSchema, defineTable } from "convex/server";
+import { v } from "convex/values";
+
+export default defineSchema({
+  // ── Users ──────────────────────────────────────────────────────────────
+  users: defineTable({
+    clerkId: v.string(),
+    fullName: v.string(),
+    email: v.string(),
+    pictureUrl: v.optional(v.string()),
+    lastLogin: v.optional(v.number()),
+  })
+    .index("by_clerk_id", ["clerkId"])
+    .index("by_email", ["email"]),
+
+  // ── Threads ────────────────────────────────────────────────────────────
+  threads: defineTable({
+    userId: v.string(), // tokenIdentifier from Clerk auth
+    title: v.string(),
+    model: v.string(),
+    updatedAt: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_and_updated", ["userId", "updatedAt"]),
+
+  // ── Messages ───────────────────────────────────────────────────────────
+  messages: defineTable({
+    threadId: v.id("threads"),
+    role: v.union(v.literal("user"), v.literal("assistant")),
+    content: v.string(),
+  }).index("by_thread", ["threadId"]),
+});

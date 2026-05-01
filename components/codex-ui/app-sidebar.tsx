@@ -9,7 +9,6 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
-  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
@@ -21,14 +20,26 @@ import {
   SettingsIcon,
 } from "lucide-react";
 import Image from "next/image";
-import { THREAD_GROUPS } from "./data";
+import { Doc } from "@/convex/_generated/dataModel";
+import { formatDistanceToNow } from "date-fns";
 
 interface AppSidebarProps {
-  activeThread: string;
+  activeThread: string | null;
+  threads: Doc<"threads">[];
   onSelectThread: (id: string) => void;
+  onNewThread: () => void;
 }
 
-export function AppSidebar({ activeThread, onSelectThread }: AppSidebarProps) {
+function relativeTime(ms: number) {
+  return formatDistanceToNow(new Date(ms), { addSuffix: true });
+}
+
+export function AppSidebar({
+  activeThread,
+  threads,
+  onSelectThread,
+  onNewThread,
+}: AppSidebarProps) {
   return (
     <Sidebar collapsible="icon">
       {/* ── Header ─────────────────────────────────────────────── */}
@@ -43,12 +54,12 @@ export function AppSidebar({ activeThread, onSelectThread }: AppSidebarProps) {
           />
         </div>
 
-        {/* Top nav actions */}
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton
               tooltip="New thread"
               className="text-[13px] font-medium"
+              onClick={onNewThread}
             >
               <PlusIcon />
               <span>New thread</span>
@@ -72,60 +83,52 @@ export function AppSidebar({ activeThread, onSelectThread }: AppSidebarProps) {
 
       {/* ── Thread list ─────────────────────────────────────────── */}
       <SidebarContent>
-        {/* Expanded mode: grouped thread labels */}
         <SidebarGroup className="p-2 group-data-[collapsible=icon]:hidden">
-          <SidebarGroupLabel className="px-2">
-            Threads
-          </SidebarGroupLabel>
-
+          <SidebarGroupLabel className="px-2">Threads</SidebarGroupLabel>
           <SidebarGroupContent>
-            {THREAD_GROUPS.map((group) => (
-              <SidebarGroup
-                key={group.id}
-                className="p-0"
-              >
-                <SidebarGroupLabel className="px-2 text-[11px] font-medium">
-                  {group.label}
-                </SidebarGroupLabel>
-
-                <SidebarMenu>
-                  {group.items.map((item) => (
-                    <SidebarMenuItem key={item.id}>
-                      <SidebarMenuButton
-                        isActive={activeThread === item.id}
-                        onClick={() => onSelectThread(item.id)}
-                        tooltip={item.title}
-                        size="sm"
-                        className="text-[13px]"
-                      >
-                        <FileIcon className="shrink-0" />
-                        <span>{item.title}</span>
-                      </SidebarMenuButton>
-                      {/* Badge already has group-data-[collapsible=icon]:hidden built in */}
-                      <SidebarMenuBadge className="text-[11px]">
-                        {item.time}
-                      </SidebarMenuBadge>
-                    </SidebarMenuItem>
-                  ))}
-                </SidebarMenu>
-              </SidebarGroup>
-            ))}
+            <SidebarMenu>
+              {threads.length === 0 ? (
+                <p className="px-2 py-4 text-center text-[12px] text-muted-foreground">
+                  No threads yet. Start a new one!
+                </p>
+              ) : (
+                threads.map((thread) => (
+                  <SidebarMenuItem key={thread._id}>
+                    <SidebarMenuButton
+                      isActive={activeThread === thread._id}
+                      onClick={() => onSelectThread(thread._id)}
+                      tooltip={thread.title}
+                      size="sm"
+                      className="h-auto flex-col items-start gap-0.5 py-2 text-[13px]"
+                    >
+                      <div className="flex w-full items-center gap-2">
+                        <FileIcon className="size-3.5 shrink-0" />
+                        <span className="truncate font-medium">{thread.title}</span>
+                      </div>
+                      <span className="pl-5 text-[11px] text-muted-foreground">
+                        {relativeTime(thread.updatedAt)}
+                      </span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))
+              )}
+            </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
 
-        {/* Collapsed mode: flat icon-only list with no nested group padding */}
+        {/* Collapsed mode: icon-only list */}
         <div className="hidden px-2 py-2 group-data-[collapsible=icon]:block">
           <SidebarMenu>
-            {THREAD_GROUPS.flatMap((group) => group.items).map((item) => (
-              <SidebarMenuItem key={item.id}>
+            {threads.map((thread) => (
+              <SidebarMenuItem key={thread._id}>
                 <SidebarMenuButton
-                  isActive={activeThread === item.id}
-                  onClick={() => onSelectThread(item.id)}
-                  tooltip={item.title}
+                  isActive={activeThread === thread._id}
+                  onClick={() => onSelectThread(thread._id)}
+                  tooltip={thread.title}
                   className="mx-auto size-8 justify-center p-0"
                 >
                   <FileIcon className="size-4 shrink-0" />
-                  <span className="sr-only">{item.title}</span>
+                  <span className="sr-only">{thread.title}</span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             ))}

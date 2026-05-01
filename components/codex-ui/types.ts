@@ -28,7 +28,10 @@ export interface CodingAgentRun {
   task: string;
   status: CodingAgentStatus;
   progress: number;
-  elapsed: string;
+  /** Wall time for this agent run (seconds). */
+  durationSeconds: number;
+  /** Total tokens consumed (input + output) for this agent. */
+  tokensUsed: number;
   files: string[];
   updates: string[];
   activity: CodingAgentActivity[];
