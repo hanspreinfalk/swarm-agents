@@ -4,8 +4,8 @@ import { tags as t } from "@lezer/highlight";
 import { EditorView } from "@codemirror/view";
 
 /**
- * CodeMirror 6 theme driven by shadcn CSS variables (:root / .dark).
- * Neutral foreground/muted/destructive — no separate “IDE blue” palette.
+ * CodeMirror 6 theme driven by shadcn CSS variables for chrome, with
+ * Cursor/VS Code-like syntax colors layered in through local CSS variables.
  */
 const shadcnHighlight = HighlightStyle.define([
   {
@@ -15,30 +15,38 @@ const shadcnHighlight = HighlightStyle.define([
       t.moduleKeyword,
       t.operatorKeyword,
     ],
-    color: "var(--foreground)",
+    color: "var(--cm-keyword)",
     fontWeight: "600",
   },
   {
     tag: [t.comment, t.lineComment, t.blockComment, t.docComment],
-    color: "var(--muted-foreground)",
+    color: "var(--cm-comment)",
     fontStyle: "italic",
   },
   {
-    tag: [t.string, t.docString, t.literal, t.regexp],
-    color: "var(--muted-foreground)",
+    tag: [t.string, t.docString],
+    color: "var(--cm-string)",
+  },
+  {
+    tag: [t.regexp, t.escape],
+    color: "var(--cm-regexp)",
   },
   {
     tag: [t.number, t.bool, t.null, t.atom],
-    color: "var(--muted-foreground)",
+    color: "var(--cm-constant)",
     fontWeight: "500",
   },
   {
-    tag: [t.variableName, t.name, t.propertyName],
-    color: "var(--foreground)",
+    tag: [t.variableName, t.name],
+    color: "var(--cm-variable)",
+  },
+  {
+    tag: t.propertyName,
+    color: "var(--cm-property)",
   },
   {
     tag: [t.definition(t.variableName), t.function(t.variableName)],
-    color: "var(--foreground)",
+    color: "var(--cm-function)",
     fontWeight: "500",
   },
   {
@@ -49,24 +57,28 @@ const shadcnHighlight = HighlightStyle.define([
       t.definition(t.typeName),
       t.tagName,
     ],
-    color: "var(--foreground)",
+    color: "var(--cm-type)",
     fontWeight: "500",
   },
   {
-    tag: [t.attributeName, t.attributeValue],
-    color: "var(--muted-foreground)",
+    tag: t.attributeName,
+    color: "var(--cm-attribute)",
     fontWeight: "500",
   },
-  { tag: t.self, color: "var(--muted-foreground)", fontWeight: "600" },
+  {
+    tag: t.attributeValue,
+    color: "var(--cm-string)",
+  },
+  { tag: t.self, color: "var(--cm-variable)", fontWeight: "600" },
   {
     tag: [t.operator, t.bracket, t.punctuation, t.derefOperator],
-    color: "var(--muted-foreground)",
+    color: "var(--cm-punctuation)",
   },
-  { tag: t.compareOperator, color: "var(--foreground)" },
-  { tag: t.meta, color: "var(--muted-foreground)" },
+  { tag: t.compareOperator, color: "var(--cm-operator)" },
+  { tag: t.meta, color: "var(--cm-meta)" },
   {
     tag: t.link,
-    color: "var(--foreground)",
+    color: "var(--cm-link)",
     textDecoration: "underline",
   },
   { tag: t.invalid, color: "var(--destructive)" },
@@ -75,12 +87,42 @@ const shadcnHighlight = HighlightStyle.define([
 const shadcnChrome = EditorView.theme(
   {
     "&": {
+      "--cm-keyword": "#0000ff",
+      "--cm-comment": "#008000",
+      "--cm-string": "#a31515",
+      "--cm-regexp": "#811f3f",
+      "--cm-constant": "#098658",
+      "--cm-variable": "#001080",
+      "--cm-property": "#001080",
+      "--cm-function": "#795e26",
+      "--cm-type": "#267f99",
+      "--cm-attribute": "#800000",
+      "--cm-punctuation": "#393a34",
+      "--cm-operator": "#000000",
+      "--cm-meta": "#af00db",
+      "--cm-link": "#0000ff",
       height: "100%",
       fontSize: "13px",
       fontFamily: "var(--font-mono), ui-monospace, monospace",
       backgroundColor: "var(--background)",
       color: "var(--foreground)",
       caretColor: "var(--foreground)",
+    },
+    ".dark &": {
+      "--cm-keyword": "#c586c0",
+      "--cm-comment": "#6a9955",
+      "--cm-string": "#ce9178",
+      "--cm-regexp": "#d16969",
+      "--cm-constant": "#b5cea8",
+      "--cm-variable": "#9cdcfe",
+      "--cm-property": "#9cdcfe",
+      "--cm-function": "#dcdcaa",
+      "--cm-type": "#4ec9b0",
+      "--cm-attribute": "#92c5f8",
+      "--cm-punctuation": "#d4d4d4",
+      "--cm-operator": "#d4d4d4",
+      "--cm-meta": "#c586c0",
+      "--cm-link": "#4fc1ff",
     },
     ".cm-scroller": {
       overflow: "auto",

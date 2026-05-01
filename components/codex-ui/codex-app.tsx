@@ -63,14 +63,6 @@ import {
   parentDirOf,
 } from "./virtual-file-tree";
 
-const REPOSITORIES = [
-  "hanspreinfalk/swarm-agents",
-  "hanspreinfalk/agent-runtime",
-  "openai/codex",
-  "vercel/ai-chatbot",
-];
-
-const INITIAL_BRANCHES = ["main", "feature/codex-ui", "preview/webview", "fix/sidebar"];
 const DEFAULT_CHAT_PANEL_SIZE = 44;
 const MIN_CHAT_PANEL_SIZE = 25;
 const MIN_CODE_PANEL_SIZE = 20;
@@ -102,6 +94,26 @@ const INITIAL_TERMINALS = [
 ];
 
 const CLEAR_SENTINEL = "__CLEAR__";
+
+type GithubRepository = {
+  fullName: string;
+  defaultBranch: string;
+  htmlUrl: string;
+  private: boolean;
+};
+
+type GithubBranch = {
+  name: string;
+  sha: string;
+};
+
+type GithubFilePayload = {
+  path: string;
+  content: string;
+  language: CodeFile["language"];
+  sha?: string;
+  size?: number;
+};
 
 function simulateShellResponse(cmd: string): string {
   const trimmed = cmd.trim();
@@ -150,6 +162,19 @@ function appendTerminalOutput(
   return `${previous}\n$ ${cmd}\n${body}$ `;
 }
 
+async function postGithub<T>(body: Record<string, unknown>): Promise<T> {
+  const response = await fetch("/api/github", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = (await response.json()) as T & { error?: string };
+  if (!response.ok) {
+    throw new Error(payload.error ?? `GitHub request failed: ${response.status}`);
+  }
+  return payload;
+}
+
 export function CodexApp() {
   // ── Convex data ─────────────────────────────────────────────────
   const threadsQuery = useQuery(api.threads.listThreads);
@@ -169,6 +194,8 @@ export function CodexApp() {
   const updateThreadMutation = useMutation(api.threads.updateThread);
   const deleteThreadMutation = useMutation(api.threads.deleteThread);
   const deleteAssistantMessageMutation = useMutation(api.threads.deleteAssistantMessage);
+  const replaceRepositoryFilesMutation = useMutation(api.threads.replaceRepositoryFiles);
+  const saveRepositoryFileMutation = useMutation(api.threads.saveRepositoryFile);
   const setMessageSentimentMutation = useMutation(api.likedMessages.setSentiment);
 
   const likedMessagesQuery = useQuery(
@@ -176,6 +203,8 @@ export function CodexApp() {
     activeThreadId ? { threadId: activeThreadId as Id<"threads"> } : "skip"
   );
   const likedRows = likedMessagesQuery ?? [];
+
+  const activeThread = threads.find((t) => t._id === activeThreadId);
 
   const feedbackByMessageId = useMemo(() => {
     const map = new Map<string, "up" | "down">();
@@ -207,14 +236,46 @@ export function CodexApp() {
     ...CODE_FILES,
   }));
   const [emptyFolders, setEmptyFolders] = useState<Set<string>>(() => new Set());
+  const [repositories, setRepositories] = useState<GithubRepository[]>([]);
+  const [selectedRepo, setSelectedRepo] = useState<string | null>(null);
+  const [branches, setBranches] = useState<GithubBranch[]>([]);
+  const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
+  const [isLoadingRepos, setIsLoadingRepos] = useState(false);
+  const [isLoadingBranches, setIsLoadingBranches] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [isCommitting, setIsCommitting] = useState(false);
+  const saveTimersRef = useRef<Record<string, number>>({});
 
-  const handleCodeFileChange = useCallback((path: string, content: string) => {
-    setCodeFiles((prev) => {
-      const cur = prev[path];
-      if (!cur) return prev;
-      return { ...prev, [path]: { ...cur, content } };
-    });
-  }, []);
+  const handleCodeFileChange = useCallback(
+    (path: string, content: string) => {
+      let nextFile: CodeFile | undefined;
+      setCodeFiles((prev) => {
+        const cur = prev[path];
+        if (!cur) return prev;
+        nextFile = { ...cur, content };
+        return { ...prev, [path]: nextFile };
+      });
+
+      if (!activeThreadId || !selectedRepo || !selectedBranch || !nextFile) return;
+      window.clearTimeout(saveTimersRef.current[path]);
+      saveTimersRef.current[path] = window.setTimeout(() => {
+        saveRepositoryFileMutation({
+          threadId: activeThreadId as Id<"threads">,
+          repositoryFullName: selectedRepo,
+          branch: selectedBranch,
+          file: {
+            path,
+            content,
+            language: nextFile!.language,
+            size: new TextEncoder().encode(content).byteLength,
+          },
+        }).catch(() => {
+          toast.error(`Could not save ${path} to the thread.`);
+        });
+      }, 450);
+    },
+    [activeThreadId, saveRepositoryFileMutation, selectedBranch, selectedRepo]
+  );
 
   const handleAddFile = useCallback(
     (parentDir: string, name: string): boolean => {
@@ -407,9 +468,6 @@ export function CodexApp() {
   const [commitDialogOpen, setCommitDialogOpen] = useState(false);
   const [newBranchDialogOpen, setNewBranchDialogOpen] = useState(false);
   const [newBranchNameDraft, setNewBranchNameDraft] = useState("");
-  const [selectedRepo, setSelectedRepo] = useState(REPOSITORIES[0]);
-  const [branches, setBranches] = useState<string[]>(() => [...INITIAL_BRANCHES]);
-  const [selectedBranch, setSelectedBranch] = useState(INITIAL_BRANCHES[0]);
   const [chatPanelSize, setChatPanelSize] = useState(DEFAULT_CHAT_PANEL_SIZE);
   const [isTerminalVisible, setIsTerminalVisible] = useState(true);
   const [terminalHeight, setTerminalHeight] = useState(DEFAULT_TERMINAL_HEIGHT);
@@ -419,42 +477,359 @@ export function CodexApp() {
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const rightPanelRef = useRef<HTMLDivElement | null>(null);
 
+  const repositoryFilesQuery = useQuery(
+    api.threads.listRepositoryFiles,
+    activeThreadId && selectedBranch
+      ? {
+          threadId: activeThreadId as Id<"threads">,
+          branch: selectedBranch,
+        }
+      : "skip"
+  );
+  const repositoryFiles = repositoryFilesQuery ?? [];
+
+  useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) setIsLoadingRepos(true);
+    });
+    postGithub<{ repositories: GithubRepository[] }>({ action: "listRepos" })
+      .then(({ repositories: nextRepositories }) => {
+        if (cancelled) return;
+        setRepositories(nextRepositories);
+        setSelectedRepo((current) => {
+          if (current) return current;
+          return nextRepositories[0]?.fullName ?? null;
+        });
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          toast.error(error instanceof Error ? error.message : "Could not load GitHub repositories.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingRepos(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedRepo) return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) setIsLoadingBranches(true);
+    });
+    postGithub<{ branches: GithubBranch[] }>({
+      action: "listBranches",
+      repositoryFullName: selectedRepo,
+    })
+      .then(({ branches: nextBranches }) => {
+        if (cancelled) return;
+        setBranches(nextBranches);
+        setSelectedBranch((current) => {
+          const currentStillExists = current && nextBranches.some((branch) => branch.name === current);
+          if (currentStillExists) return current;
+          const repo = repositories.find((repository) => repository.fullName === selectedRepo);
+          return activeThread?.branch ?? repo?.defaultBranch ?? nextBranches[0]?.name ?? null;
+        });
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          toast.error(error instanceof Error ? error.message : "Could not load branches.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingBranches(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeThread?.branch, repositories, selectedRepo]);
+
+  useEffect(() => {
+    if (!activeThread) return;
+    const repositoryFullName = activeThread.repositoryFullName ?? repositories[0]?.fullName ?? null;
+    queueMicrotask(() => {
+      setSelectedRepo(repositoryFullName);
+      setSelectedBranch(
+        activeThread.branch ??
+          repositories.find((repo) => repo.fullName === repositoryFullName)?.defaultBranch ??
+          null
+      );
+    });
+  }, [activeThread, repositories]);
+
+  useEffect(() => {
+    if (!activeThreadId || !selectedBranch || repositoryFilesQuery === undefined) return;
+    const nextFiles: Record<string, CodeFile> = {};
+    for (const file of repositoryFiles) {
+      nextFiles[file.path] = {
+        content: file.content,
+        language: file.language,
+      };
+    }
+    queueMicrotask(() => {
+      setCodeFiles(nextFiles);
+      setEmptyFolders(new Set());
+      setActiveFile(Object.keys(nextFiles).sort()[0] ?? "");
+    });
+  }, [activeThreadId, repositoryFiles, repositoryFilesQuery, selectedBranch]);
+
+  useEffect(() => {
+    const timers = saveTimersRef.current;
+    return () => {
+      for (const timer of Object.values(timers)) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, []);
+
   const activeTerminal =
     terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
+
+  const syncRepositoryForThread = useCallback(
+    async (threadId: string, repositoryFullName: string, branch: string) => {
+      const result = await postGithub<{
+        files: GithubFilePayload[];
+        truncated: boolean;
+      }>({
+        action: "sync",
+        repositoryFullName,
+        branch,
+      });
+
+      await replaceRepositoryFilesMutation({
+        threadId: threadId as Id<"threads">,
+        repositoryFullName,
+        branch,
+        files: result.files,
+      });
+
+      const nextFiles = result.files.reduce<Record<string, CodeFile>>((acc, file) => {
+        acc[file.path] = {
+          content: file.content,
+          language: file.language,
+        };
+        return acc;
+      }, {});
+      setCodeFiles(nextFiles);
+      setEmptyFolders(new Set());
+      setActiveFile(Object.keys(nextFiles).sort()[0] ?? "");
+
+      if (result.truncated) {
+        toast.warning("Synced the first text files from a large repository.");
+      } else {
+        toast.success(`Synced ${result.files.length} files from GitHub.`);
+      }
+    },
+    [replaceRepositoryFilesMutation]
+  );
+
+  const ensureActiveThread = useCallback(
+    async (title = "New thread") => {
+      if (!selectedRepo || !selectedBranch) {
+        toast.error("Choose a GitHub repository first.");
+        return null;
+      }
+      if (activeThreadId) return activeThreadId;
+
+      const threadId = await createThreadMutation({
+        title,
+        model: selectedModel,
+        repositoryFullName: selectedRepo,
+        branch: selectedBranch,
+      });
+      setActiveThreadId(threadId);
+      return threadId;
+    },
+    [activeThreadId, createThreadMutation, selectedBranch, selectedModel, selectedRepo]
+  );
 
   const handleNewBranchDialogOpenChange = useCallback((open: boolean) => {
     setNewBranchDialogOpen(open);
     if (!open) setNewBranchNameDraft("");
   }, []);
 
-  const handleCreateBranch = useCallback(() => {
+  const handleCreateBranch = useCallback(async () => {
     const name = newBranchNameDraft.trim();
     if (!name) {
       toast.error("Enter a branch name");
       return;
     }
-    if (branches.some((b) => b === name)) {
+    if (!selectedRepo || !selectedBranch) {
+      toast.error("Choose a repository and branch first");
+      return;
+    }
+    if (branches.some((branch) => branch.name === name)) {
       toast.error("A branch with that name already exists");
       return;
     }
-    setBranches((prev) => [...prev, name]);
-    setSelectedBranch(name);
-    setNewBranchDialogOpen(false);
-    setNewBranchNameDraft("");
-    toast.success(`Created and checked out ${name}`);
-  }, [newBranchNameDraft, branches]);
+    const threadId = await ensureActiveThread();
+    if (!threadId) return;
+
+    try {
+      const branch = await postGithub<GithubBranch>({
+        action: "createBranch",
+        repositoryFullName: selectedRepo,
+        sourceBranch: selectedBranch,
+        newBranch: name,
+      });
+      setBranches((prev) => [...prev, branch]);
+      setSelectedBranch(name);
+      await updateThreadMutation({
+        threadId: threadId as Id<"threads">,
+        repositoryFullName: selectedRepo,
+        branch: name,
+      });
+      setNewBranchDialogOpen(false);
+      setNewBranchNameDraft("");
+      toast.success(`Created and checked out ${name}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not create branch.");
+    }
+  }, [
+    branches,
+    ensureActiveThread,
+    newBranchNameDraft,
+    selectedBranch,
+    selectedRepo,
+    updateThreadMutation,
+  ]);
+
+  const handleSelectRepository = useCallback(
+    async (repositoryFullName: string) => {
+      const repo = repositories.find((item) => item.fullName === repositoryFullName);
+      const nextBranch = repo?.defaultBranch ?? null;
+      setSelectedRepo(repositoryFullName);
+      setSelectedBranch(nextBranch);
+      setCodeFiles({});
+      setActiveFile("");
+
+      if (activeThreadId) {
+        await updateThreadMutation({
+          threadId: activeThreadId as Id<"threads">,
+          repositoryFullName,
+          ...(nextBranch ? { branch: nextBranch } : {}),
+        });
+      }
+    },
+    [activeThreadId, repositories, updateThreadMutation]
+  );
+
+  const handleSelectBranch = useCallback(
+    async (branch: string) => {
+      if (!selectedRepo) return;
+      const threadId = await ensureActiveThread();
+      if (!threadId) return;
+
+      setSelectedBranch(branch);
+      setIsSyncing(true);
+      try {
+        await updateThreadMutation({
+          threadId: threadId as Id<"threads">,
+          repositoryFullName: selectedRepo,
+          branch,
+        });
+        await syncRepositoryForThread(threadId, selectedRepo, branch);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Could not switch branches.");
+      } finally {
+        setIsSyncing(false);
+      }
+    },
+    [ensureActiveThread, selectedRepo, syncRepositoryForThread, updateThreadMutation]
+  );
+
+  const handleSyncRepository = useCallback(async () => {
+    if (!selectedRepo || !selectedBranch) {
+      toast.error("Choose a GitHub repository first.");
+      return;
+    }
+    const threadId = await ensureActiveThread();
+    if (!threadId) return;
+
+    setIsSyncing(true);
+    try {
+      await syncRepositoryForThread(threadId, selectedRepo, selectedBranch);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not sync repository.");
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [ensureActiveThread, selectedBranch, selectedRepo, syncRepositoryForThread]);
+
+  const handleOpenRepository = useCallback(() => {
+    if (!selectedRepo) {
+      toast.error("Choose a GitHub repository first.");
+      return;
+    }
+    window.open(`https://github.com/${selectedRepo}`, "_blank", "noopener,noreferrer");
+  }, [selectedRepo]);
+
+  const handleCommit = useCallback(
+    async (message: string) => {
+      if (!selectedRepo || !selectedBranch) {
+        toast.error("Choose a GitHub repository first.");
+        return;
+      }
+      const threadId = await ensureActiveThread();
+      if (!threadId) return;
+
+      const files = Object.entries(codeFiles).map(([path, file]) => ({
+        path,
+        content: file.content,
+        language: file.language,
+      }));
+      if (files.length === 0) {
+        toast.error("There are no files to commit.");
+        return;
+      }
+
+      setIsCommitting(true);
+      try {
+        const result = await postGithub<{ sha: string; htmlUrl: string }>({
+          action: "commit",
+          repositoryFullName: selectedRepo,
+          branch: selectedBranch,
+          message: message.trim(),
+          files,
+        });
+        await replaceRepositoryFilesMutation({
+          threadId: threadId as Id<"threads">,
+          repositoryFullName: selectedRepo,
+          branch: selectedBranch,
+          files,
+        });
+        setCommitDialogOpen(false);
+        toast.success(`Committed ${result.sha.slice(0, 7)} to ${selectedBranch}.`);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Could not commit changes.");
+      } finally {
+        setIsCommitting(false);
+      }
+    },
+    [
+      codeFiles,
+      ensureActiveThread,
+      replaceRepositoryFilesMutation,
+      selectedBranch,
+      selectedRepo,
+    ]
+  );
 
   useEffect(() => {
     if (terminals.length === 0) return;
     if (!terminals.some((t) => t.id === activeTerminalId)) {
-      setActiveTerminalId(terminals[0].id);
+      queueMicrotask(() => setActiveTerminalId(terminals[0].id));
     }
   }, [terminals, activeTerminalId]);
 
   // Auto-select the first thread when threads load
   useEffect(() => {
     if (!activeThreadId && threads.length > 0) {
-      setActiveThreadId(threads[0]._id);
+      queueMicrotask(() => setActiveThreadId(threads[0]._id));
     }
   }, [threads, activeThreadId]);
 
@@ -494,18 +869,23 @@ export function CodexApp() {
       : []),
   ];
 
-  // ── Active thread title ──────────────────────────────────────────
-  const activeThread = threads.find((t) => t._id === activeThreadId);
-
   // ── Thread management ────────────────────────────────────────────
   const handleNewThread = useCallback(async () => {
+    if (!selectedRepo || !selectedBranch) {
+      toast.error("Choose a GitHub repository first.");
+      return;
+    }
     const threadId = await createThreadMutation({
       title: "New thread",
       model: selectedModel,
+      repositoryFullName: selectedRepo,
+      branch: selectedBranch,
     });
     setActiveThreadId(threadId);
     setStreamingContent("");
-  }, [createThreadMutation, selectedModel]);
+    setCodeFiles({});
+    setActiveFile("");
+  }, [createThreadMutation, selectedBranch, selectedModel, selectedRepo]);
 
   const handleSelectThread = useCallback((id: string) => {
     setActiveThreadId(id);
@@ -608,6 +988,8 @@ export function CodexApp() {
         threadId = await createThreadMutation({
           title: text.slice(0, 60),
           model: selectedModel,
+          ...(selectedRepo ? { repositoryFullName: selectedRepo } : {}),
+          ...(selectedBranch ? { branch: selectedBranch } : {}),
         });
         setActiveThreadId(threadId);
       } else if (dbMessages.length === 0) {
@@ -616,6 +998,8 @@ export function CodexApp() {
           threadId: threadId as Id<"threads">,
           title: text.slice(0, 60),
           model: selectedModel,
+          ...(selectedRepo ? { repositoryFullName: selectedRepo } : {}),
+          ...(selectedBranch ? { branch: selectedBranch } : {}),
         });
       }
 
@@ -637,6 +1021,8 @@ export function CodexApp() {
       activeThreadId,
       dbMessages,
       selectedModel,
+      selectedRepo,
+      selectedBranch,
       createThreadMutation,
       addMessageMutation,
       updateThreadMutation,
@@ -835,16 +1221,19 @@ export function CodexApp() {
                     type="button"
                     className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
                   >
-                    GitHub · {selectedRepo}
+                    GitHub · {selectedRepo ?? (isLoadingRepos ? "Loading..." : "Select repo")}
                     <ChevronDownIcon size={11} />
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent className="w-64">
                   <DropdownMenuLabel>Repositories</DropdownMenuLabel>
-                  <DropdownMenuRadioGroup value={selectedRepo} onValueChange={setSelectedRepo}>
-                    {REPOSITORIES.map((repo) => (
-                      <DropdownMenuRadioItem key={repo} value={repo}>
-                        <span className="truncate">{repo}</span>
+                  <DropdownMenuRadioGroup
+                    value={selectedRepo ?? ""}
+                    onValueChange={handleSelectRepository}
+                  >
+                    {repositories.map((repo) => (
+                      <DropdownMenuRadioItem key={repo.fullName} value={repo.fullName}>
+                        <span className="truncate">{repo.fullName}</span>
                       </DropdownMenuRadioItem>
                     ))}
                   </DropdownMenuRadioGroup>
@@ -858,17 +1247,20 @@ export function CodexApp() {
                     className="hidden items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground sm:inline-flex"
                   >
                     <GitBranchIcon size={12} />
-                    {selectedBranch}
+                    {selectedBranch ?? (isLoadingBranches ? "Loading..." : "Select branch")}
                     <ChevronDownIcon size={11} />
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent className="w-52">
                   <DropdownMenuLabel>Branches</DropdownMenuLabel>
                   <DropdownMenuSeparator />
-                  <DropdownMenuRadioGroup value={selectedBranch} onValueChange={setSelectedBranch}>
+                  <DropdownMenuRadioGroup
+                    value={selectedBranch ?? ""}
+                    onValueChange={handleSelectBranch}
+                  >
                     {branches.map((branch) => (
-                      <DropdownMenuRadioItem key={branch} value={branch}>
-                        <span className="truncate">{branch}</span>
+                      <DropdownMenuRadioItem key={branch.name} value={branch.name}>
+                        <span className="truncate">{branch.name}</span>
                       </DropdownMenuRadioItem>
                     ))}
                   </DropdownMenuRadioGroup>
@@ -878,7 +1270,8 @@ export function CodexApp() {
               <button
                 type="button"
                 onClick={() => setNewBranchDialogOpen(true)}
-                className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+                disabled={!selectedRepo || !selectedBranch}
+                className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <GitBranchPlusIcon size={12} />
                 New branch
@@ -886,15 +1279,22 @@ export function CodexApp() {
 
               <button
                 type="button"
-                className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+                onClick={handleSyncRepository}
+                disabled={!selectedRepo || !selectedBranch || isSyncing}
+                className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <RefreshCwIcon size={12} />
-                Sync
+                <RefreshCwIcon
+                  className={isSyncing ? "animate-spin" : undefined}
+                  size={12}
+                />
+                {isSyncing ? "Syncing" : "Sync"}
               </button>
             </div>
             <div className="ml-auto flex items-center gap-2">
               <button
                 type="button"
+                onClick={handleOpenRepository}
+                disabled={!selectedRepo}
                 className="rounded-md px-3 py-1.5 text-[13px] font-medium text-foreground ring-1 ring-border transition-colors hover:bg-muted"
               >
                 Open
@@ -902,7 +1302,8 @@ export function CodexApp() {
               <button
                 type="button"
                 onClick={() => setCommitDialogOpen(true)}
-                className="rounded-md bg-foreground px-3 py-1.5 text-[13px] font-medium text-background transition-colors hover:opacity-85"
+                disabled={!selectedRepo || !selectedBranch || Object.keys(codeFiles).length === 0}
+                className="rounded-md bg-foreground px-3 py-1.5 text-[13px] font-medium text-background transition-colors hover:opacity-85 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Commit
               </button>
@@ -1109,8 +1510,13 @@ export function CodexApp() {
       </Dialog>
 
       <CommitDialog
+        branch={selectedBranch}
+        files={Object.keys(codeFiles).sort()}
+        isCommitting={isCommitting}
+        onCommit={handleCommit}
         open={commitDialogOpen}
         onOpenChange={setCommitDialogOpen}
+        repositoryFullName={selectedRepo}
       />
     </TooltipProvider>
   );

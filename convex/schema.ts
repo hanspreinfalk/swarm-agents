@@ -18,10 +18,32 @@ export default defineSchema({
     userId: v.string(), // tokenIdentifier from Clerk auth
     title: v.string(),
     model: v.string(),
+    repositoryFullName: v.optional(v.string()),
+    branch: v.optional(v.string()),
     updatedAt: v.number(),
   })
     .index("by_user", ["userId"])
     .index("by_user_and_updated", ["userId", "updatedAt"]),
+
+  // ── Synced repository files per thread/branch ──────────────────────────
+  repositoryFiles: defineTable({
+    threadId: v.id("threads"),
+    repositoryFullName: v.string(),
+    branch: v.string(),
+    path: v.string(),
+    content: v.string(),
+    language: v.union(
+      v.literal("typescript"),
+      v.literal("javascript"),
+      v.literal("python")
+    ),
+    sha: v.optional(v.string()),
+    size: v.optional(v.number()),
+    updatedAt: v.number(),
+  })
+    .index("by_thread", ["threadId"])
+    .index("by_thread_and_branch", ["threadId", "branch"])
+    .index("by_thread_and_branch_and_path", ["threadId", "branch", "path"]),
 
   // ── Messages ───────────────────────────────────────────────────────────
   messages: defineTable({
