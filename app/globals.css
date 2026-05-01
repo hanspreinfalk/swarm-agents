@@ -82,6 +82,8 @@
   --sidebar-accent-foreground: oklch(0.2 0.01 270);
   --sidebar-border: oklch(0.905 0.008 270);
   --sidebar-ring: oklch(0.65 0.01 270);
+  /* @clerk/themes shadcn: colorModalBackdrop uses var(--color-black) */
+  --color-black: oklch(0.145 0 0 / 0.55);
 }
 
 .dark {
@@ -116,6 +118,7 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
+  --color-black: oklch(0 0 0 / 0.78);
 }
 
 @layer base {

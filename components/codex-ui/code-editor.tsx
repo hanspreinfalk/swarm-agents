@@ -2,44 +2,11 @@
 
 import { javascript } from "@codemirror/lang-javascript";
 import { python } from "@codemirror/lang-python";
-import { githubLight } from "@uiw/codemirror-theme-github";
 import CodeMirror, { type Extension } from "@uiw/react-codemirror";
 import { EditorView } from "@codemirror/view";
-import { useMemo } from "react";
-
-const baseTheme = EditorView.theme({
-  "&": {
-    fontSize: "13px",
-    fontFamily: "var(--font-mono), 'JetBrains Mono', monospace",
-    height: "100%",
-  },
-  ".cm-scroller": {
-    overflow: "auto",
-    lineHeight: "1.6",
-  },
-  ".cm-content": {
-    padding: "12px 0",
-  },
-  ".cm-gutters": {
-    backgroundColor: "#f6f8fa",
-    border: "none",
-    borderRight: "1px solid #eaecef",
-    color: "#8b949e",
-    minWidth: "40px",
-  },
-  ".cm-activeLineGutter": {
-    backgroundColor: "#f0f4f8",
-  },
-  ".cm-activeLine": {
-    backgroundColor: "#f0f4f8",
-  },
-  ".cm-focused": {
-    outline: "none",
-  },
-  ".cm-selectionBackground": {
-    backgroundColor: "#dbeafe !important",
-  },
-});
+import { useTheme } from "next-themes";
+import { useEffect, useMemo, useState } from "react";
+import { shadcnCodemirrorTheme } from "./codemirror-shadcn-theme";
 
 export type CodeEditorLanguage = "typescript" | "javascript" | "python";
 
@@ -56,8 +23,18 @@ export function CodeEditor({
   onChange,
   readOnly = false,
 }: CodeEditorProps) {
+  const { resolvedTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
   const extensions = useMemo<Extension[]>(() => {
-    const exts: Extension[] = [baseTheme];
+    const isDark = mounted && resolvedTheme === "dark";
+    const exts: Extension[] = [
+      EditorView.darkTheme.of(isDark),
+      ...shadcnCodemirrorTheme(),
+    ];
     if (language === "python") {
       exts.push(python());
     } else {
@@ -66,13 +43,13 @@ export function CodeEditor({
       );
     }
     return exts;
-  }, [language]);
+  }, [language, mounted, resolvedTheme]);
 
   return (
     <CodeMirror
       value={value}
+      theme="none"
       extensions={extensions}
-      theme={githubLight}
       onChange={onChange}
       readOnly={readOnly}
       height="100%"

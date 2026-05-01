@@ -103,10 +103,13 @@ const statusLabels: Record<CodingAgentStatus, string> = {
 
 const statusClasses: Record<CodingAgentStatus, string> = {
   queued: "bg-muted text-muted-foreground ring-border",
-  running: "bg-blue-50 text-blue-600 ring-blue-200",
-  reviewing: "bg-amber-50 text-amber-700 ring-amber-200",
-  done: "bg-green-50 text-green-600 ring-green-200",
-  stopped: "bg-red-50 text-red-600 ring-red-200",
+  running:
+    "bg-blue-500/15 text-blue-700 ring-blue-500/25 dark:text-blue-300 dark:ring-blue-400/30",
+  reviewing:
+    "bg-amber-500/15 text-amber-800 ring-amber-500/25 dark:text-amber-200 dark:ring-amber-400/30",
+  done: "bg-green-500/15 text-green-700 ring-green-500/25 dark:text-green-300 dark:ring-green-400/30",
+  stopped:
+    "bg-destructive/15 text-destructive ring-destructive/25 dark:ring-destructive/40",
 };
 
 function formatAgentDuration(seconds: number): string {
@@ -142,8 +145,8 @@ function AgentConversation({ agent }: { agent: CodingAgentRun }) {
   const finalUpdate = agent.updates[agent.updates.length - 1];
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-gradient-to-b from-muted/30 to-white shadow-sm">
-      <div className="border-b border-border bg-white/80 px-3 py-2.5 backdrop-blur-sm">
+    <div className="overflow-hidden rounded-xl border border-border bg-gradient-to-b from-muted/30 to-background shadow-sm">
+      <div className="border-b border-border bg-background/80 px-3 py-2.5 backdrop-blur-sm">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
             <p className="truncate text-[13px] font-semibold text-foreground">
@@ -190,11 +193,11 @@ function AgentConversation({ agent }: { agent: CodingAgentRun }) {
         </div>
 
         <div className="flex items-start gap-3">
-          <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-blue-50 text-[10px] font-semibold text-blue-600 ring-1 ring-blue-200">
+          <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-blue-500/15 text-[10px] font-semibold text-blue-700 ring-1 ring-blue-500/25 dark:text-blue-300 dark:ring-blue-400/30">
             A
           </div>
           <div className="min-w-0 flex-1">
-            <div className="rounded-xl border border-border bg-white px-3 py-2.5">
+            <div className="rounded-xl border border-border bg-card px-3 py-2.5">
               <div className="mb-1 text-[11px] font-semibold text-muted-foreground">
                 {agent.name}
               </div>
@@ -226,7 +229,7 @@ function AgentConversation({ agent }: { agent: CodingAgentRun }) {
               ))}
             </div>
 
-            <div className="mt-3 rounded-xl border border-border bg-white px-3 py-2.5">
+            <div className="mt-3 rounded-xl border border-border bg-card px-3 py-2.5">
               <div className="mb-2 flex flex-wrap gap-1.5">
                 {agent.files.map((file) => (
                   <span
@@ -266,8 +269,8 @@ function ParallelAgentTimeline({
   const maxDurationSeconds = Math.max(0, ...agents.map((a) => a.durationSeconds));
 
   return (
-    <div className="mt-4 overflow-hidden rounded-2xl border border-border bg-gradient-to-b from-muted/40 via-white to-white shadow-sm ring-1 ring-black/[0.03]">
-      <div className="border-b border-border bg-white/90 px-3 py-3 backdrop-blur-sm sm:px-4">
+    <div className="mt-4 overflow-hidden rounded-2xl border border-border bg-gradient-to-b from-muted/40 via-background to-background shadow-sm ring-1 ring-border/60">
+      <div className="border-b border-border bg-background/90 px-3 py-3 backdrop-blur-sm sm:px-4">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <p className="text-[13px] font-semibold tracking-tight text-foreground">
@@ -295,7 +298,7 @@ function ParallelAgentTimeline({
         </div>
       </div>
 
-      <div className="divide-y divide-border bg-white/60">
+      <div className="divide-y divide-border bg-background/60">
         {agents.map((agent, index) => {
           const canStop =
             agent.status === "running" || agent.status === "reviewing";
@@ -308,7 +311,7 @@ function ParallelAgentTimeline({
                 )}
                 <div className="relative flex items-start gap-2 sm:gap-3">
                   <CollapsibleTrigger className="group flex min-w-0 flex-1 items-start gap-2.5 text-left outline-none sm:gap-3">
-                    <span className="z-10 mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full border border-border bg-white shadow-sm">
+                    <span className="z-10 mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full border border-border bg-card shadow-sm">
                       <AgentStatusIcon status={agent.status} />
                     </span>
                     <span className="min-w-0 flex-1 pb-0.5">
@@ -459,16 +462,7 @@ export function ChatPanel({
   );
 
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateRows: "1fr auto",
-        height: "100%",
-        width: "100%",
-        overflow: "hidden",
-        background: "white",
-      }}
-    >
+    <div className="grid h-full w-full grid-rows-[1fr_auto] overflow-hidden bg-background">
       {/* Messages */}
       <Conversation
         initial="instant"
@@ -589,7 +583,7 @@ export function ChatPanel({
       </Conversation>
 
       {/* Prompt bar */}
-      <div className="border-t border-border bg-white p-4">
+      <div className="border-t border-border bg-background p-4">
         <div className="mx-auto w-full max-w-2xl">
           <PromptInput
             onSubmit={handleSubmit}

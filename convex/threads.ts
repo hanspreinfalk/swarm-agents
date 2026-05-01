@@ -1,5 +1,31 @@
 import { v } from "convex/values";
+import type { Id } from "./_generated/dataModel";
+import type { MutationCtx } from "./_generated/server";
 import { mutation, query } from "./_generated/server";
+
+/** Deletes all messages, their likedMessages rows, and the thread document. */
+export async function deleteThreadCascade(
+  ctx: MutationCtx,
+  threadId: Id<"threads">,
+) {
+  const messages = await ctx.db
+    .query("messages")
+    .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+    .collect();
+
+  for (const message of messages) {
+    const feedback = await ctx.db
+      .query("likedMessages")
+      .withIndex("by_message", (q) => q.eq("messageId", message._id))
+      .collect();
+    for (const row of feedback) {
+      await ctx.db.delete(row._id);
+    }
+    await ctx.db.delete(message._id);
+  }
+
+  await ctx.db.delete(threadId);
+}
 
 export const createThread = mutation({
   args: {
@@ -77,23 +103,7 @@ export const deleteThread = mutation({
       throw new Error("Unauthorized");
     }
 
-    const messages = await ctx.db
-      .query("messages")
-      .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
-      .collect();
-
-    for (const message of messages) {
-      const feedback = await ctx.db
-        .query("likedMessages")
-        .withIndex("by_message", (q) => q.eq("messageId", message._id))
-        .collect();
-      for (const row of feedback) {
-        await ctx.db.delete(row._id);
-      }
-      await ctx.db.delete(message._id);
-    }
-
-    await ctx.db.delete(args.threadId);
+    await deleteThreadCascade(ctx, args.threadId);
   },
 });
 

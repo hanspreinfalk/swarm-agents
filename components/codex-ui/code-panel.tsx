@@ -83,16 +83,7 @@ export function CodePanel({
      * Outer shell — already fills its Panel via the absolute wrapper in codex-app.
      * Grid gives a fixed top-bar row and a 1fr body row.
      */
-    <div
-      style={{
-        display: "grid",
-        gridTemplateRows: "2.5rem 1fr",
-        height: "100%",
-        width: "100%",
-        overflow: "hidden",
-        background: "white",
-      }}
-    >
+    <div className="grid h-full w-full grid-rows-[2.5rem_1fr] overflow-hidden bg-background">
       {/* ── Top bar (2.5rem) ────────────────────────────── */}
       <div
         className="flex items-center justify-between border-b border-border px-3"
@@ -100,10 +91,10 @@ export function CodePanel({
       >
         <div className="flex items-center gap-2 text-[13px]">
           <span className="font-medium text-foreground">2 files changed</span>
-          <span className="rounded bg-green-50 px-1.5 py-0.5 text-[11px] font-semibold text-green-600 ring-1 ring-inset ring-green-200">
+          <span className="rounded bg-green-500/15 px-1.5 py-0.5 text-[11px] font-semibold text-green-700 ring-1 ring-inset ring-green-500/25 dark:text-green-300 dark:ring-green-400/30">
             +9
           </span>
-          <span className="rounded bg-red-50 px-1.5 py-0.5 text-[11px] font-semibold text-red-500 ring-1 ring-inset ring-red-200">
+          <span className="rounded bg-destructive/15 px-1.5 py-0.5 text-[11px] font-semibold text-destructive ring-1 ring-inset ring-destructive/25">
             -6
           </span>
           <button
@@ -130,7 +121,7 @@ export function CodePanel({
               className={[
                 "rounded px-2 py-1 font-medium transition-colors",
                 view === "code"
-                  ? "bg-white text-foreground shadow-sm"
+                  ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground",
               ].join(" ")}
             >
@@ -142,7 +133,7 @@ export function CodePanel({
               className={[
                 "rounded px-2 py-1 font-medium transition-colors",
                 view === "preview"
-                  ? "bg-white text-foreground shadow-sm"
+                  ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground",
               ].join(" ")}
             >
@@ -284,7 +275,7 @@ export function CodePanel({
                 </WebPreviewNavigationButton>
                 <WebPreviewUrl className="h-8 text-[12px]" />
               </WebPreviewNavigation>
-              <WebPreviewBody className="border-0 bg-white" />
+              <WebPreviewBody className="border-0 bg-background" />
             </WebPreview>
           </div>
         )}

@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { internalMutation } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
+import { deleteThreadCascade } from "./threads";
 
 type ClerkUserInput = {
   clerkId: string;
@@ -73,8 +74,21 @@ export const deleteUserFromWebhook = internalMutation({
     clerkId: v.string(),
   },
   handler: async (ctx, args) => {
-    const existingUser = await getUserByClerkId(ctx, args.clerkId);
+    // Threads and ratings use Convex identity.tokenIdentifier, which for Clerk is
+    // `${jwtIssuer}|${clerkUserId}` (same domain as CLERK_JWT_ISSUER_DOMAIN in auth.config).
+    const issuer = process.env.CLERK_JWT_ISSUER_DOMAIN;
+    if (issuer) {
+      const tokenIdentifier = `${issuer}|${args.clerkId}`;
+      const userThreads = await ctx.db
+        .query("threads")
+        .withIndex("by_user", (q) => q.eq("userId", tokenIdentifier))
+        .collect();
+      for (const thread of userThreads) {
+        await deleteThreadCascade(ctx, thread._id);
+      }
+    }
 
+    const existingUser = await getUserByClerkId(ctx, args.clerkId);
     if (!existingUser) {
       return null;
     }

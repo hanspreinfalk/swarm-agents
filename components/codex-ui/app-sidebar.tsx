@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useTheme } from "next-themes";
 import {
   Sidebar,
   SidebarContent,
@@ -18,6 +19,10 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -42,8 +47,13 @@ import { Input } from "@/components/ui/input";
 import {
   FileIcon,
   GlobeIcon,
+  LogOutIcon,
+  MonitorIcon,
+  MoonIcon,
   MoreHorizontalIcon,
   PlusIcon,
+  SettingsIcon,
+  SunIcon,
 } from "lucide-react";
 import Image from "next/image";
 import { useClerk, useUser } from "@clerk/nextjs";
@@ -80,6 +90,14 @@ export function AppSidebar({
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [renameSubmitting, setRenameSubmitting] = useState(false);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+
+  const { theme, setTheme } = useTheme();
+  const [themeReady, setThemeReady] = useState(false);
+  useEffect(() => {
+    setThemeReady(true);
+  }, []);
 
   const deleteTarget = deleteTargetId
     ? threads.find((t) => t._id === deleteTargetId)
@@ -108,6 +126,17 @@ export function AppSidebar({
     }
   };
 
+  const handleLogoutConfirm = async () => {
+    if (!clerk.loaded) return;
+    setSigningOut(true);
+    try {
+      await clerk.signOut();
+      setLogoutConfirmOpen(false);
+    } finally {
+      setSigningOut(false);
+    }
+  };
+
   const displayName =
     user?.fullName?.trim() ||
     [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim() ||
@@ -129,7 +158,7 @@ export function AppSidebar({
       <Sidebar collapsible="icon">
         {/* ── Header ─────────────────────────────────────────────── */}
         <SidebarHeader className="p-2">
-          <div className="flex items-center px-2 py-1 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0">
+          <div className="flex items-center px-2 py-1 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0 gap-2">
             <Image
               src="/logo.svg"
               alt="SwarmAgents"
@@ -137,6 +166,7 @@ export function AppSidebar({
               height={24}
               className="shrink-0"
             />
+            <p className="group-data-[collapsible=icon]:hidden">SwarmAgents</p>
           </div>
 
           <SidebarMenu>
@@ -295,28 +325,79 @@ export function AppSidebar({
         <SidebarFooter>
           <SidebarMenu>
             <SidebarMenuItem>
-              <SidebarMenuButton
-                type="button"
-                tooltip={displayName}
-                className="text-[13px] font-medium"
-                disabled={!isLoaded || !clerk.loaded}
-                onClick={() => {
-                  if (!clerk.loaded) return;
-                  clerk.openUserProfile();
-                }}
-              >
-                <Avatar className="size-7 shrink-0 group-data-[collapsible=icon]:size-4">
-                  {user?.imageUrl ? (
-                    <AvatarImage src={user.imageUrl} alt={displayName} />
-                  ) : null}
-                  <AvatarFallback className="text-[10px] group-data-[collapsible=icon]:text-[8px]">
-                    {isLoaded ? profileInitial : "…"}
-                  </AvatarFallback>
-                </Avatar>
-                <span className="truncate group-data-[collapsible=icon]:hidden">
-                  {isLoaded ? displayName : "Loading…"}
-                </span>
-              </SidebarMenuButton>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <SidebarMenuButton
+                    type="button"
+                    tooltip={displayName}
+                    className="text-[13px] font-medium"
+                    disabled={!isLoaded || !clerk.loaded}
+                  >
+                    <Avatar className="size-7 shrink-0 group-data-[collapsible=icon]:size-4">
+                      {user?.imageUrl ? (
+                        <AvatarImage src={user.imageUrl} alt={displayName} />
+                      ) : null}
+                      <AvatarFallback className="text-[10px] group-data-[collapsible=icon]:text-[8px]">
+                        {isLoaded ? profileInitial : "…"}
+                      </AvatarFallback>
+                    </Avatar>
+                    <span className="truncate group-data-[collapsible=icon]:hidden">
+                      {isLoaded ? displayName : "Loading…"}
+                    </span>
+                  </SidebarMenuButton>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  side="right"
+                  align="end"
+                  className="min-w-48"
+                >
+                  <DropdownMenuLabel className="text-muted-foreground">
+                    Theme
+                  </DropdownMenuLabel>
+                  <DropdownMenuRadioGroup
+                    value={themeReady ? (theme ?? "system") : "system"}
+                    onValueChange={(value) =>
+                      setTheme(value as "light" | "dark" | "system")
+                    }
+                  >
+                    <DropdownMenuRadioItem value="light" className="gap-2">
+                      <SunIcon className="size-4" />
+                      Light
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem value="dark" className="gap-2">
+                      <MoonIcon className="size-4" />
+                      Dark
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem value="system" className="gap-2">
+                      <MonitorIcon className="size-4" />
+                      System
+                    </DropdownMenuRadioItem>
+                  </DropdownMenuRadioGroup>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    disabled={!clerk.loaded}
+                    onSelect={() => {
+                      if (clerk.loaded) clerk.openUserProfile();
+                    }}
+                    className="gap-2"
+                  >
+                    <SettingsIcon className="size-4" />
+                    Settings
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    variant="destructive"
+                    className="gap-2"
+                    onSelect={(e) => {
+                      e.preventDefault();
+                      setLogoutConfirmOpen(true);
+                    }}
+                  >
+                    <LogOutIcon className="size-4" />
+                    Log out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </SidebarMenuItem>
           </SidebarMenu>
         </SidebarFooter>
@@ -383,6 +464,33 @@ export function AppSidebar({
               onClick={() => void handleDeleteConfirm()}
             >
               Delete
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={logoutConfirmOpen}
+        onOpenChange={(open) => {
+          if (!signingOut) setLogoutConfirmOpen(open);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Log out?</AlertDialogTitle>
+            <AlertDialogDescription>
+              You will need to sign in again to access your threads and messages.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={signingOut}>Cancel</AlertDialogCancel>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={signingOut}
+              onClick={() => void handleLogoutConfirm()}
+            >
+              {signingOut ? "Signing out…" : "Log out"}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

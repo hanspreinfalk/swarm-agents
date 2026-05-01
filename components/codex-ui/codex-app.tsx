@@ -10,6 +10,15 @@ import {
   TerminalStatus,
   TerminalTitle,
 } from "@/components/ai-elements/terminal";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -19,6 +28,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import {
   SidebarInset,
   SidebarProvider,
@@ -29,6 +39,7 @@ import {
   ChevronDownIcon,
   EraserIcon,
   GitBranchIcon,
+  GitBranchPlusIcon,
   PlusIcon,
   RefreshCwIcon,
   Trash2Icon,
@@ -59,7 +70,7 @@ const REPOSITORIES = [
   "vercel/ai-chatbot",
 ];
 
-const BRANCHES = ["main", "feature/codex-ui", "preview/webview", "fix/sidebar"];
+const INITIAL_BRANCHES = ["main", "feature/codex-ui", "preview/webview", "fix/sidebar"];
 const DEFAULT_CHAT_PANEL_SIZE = 44;
 const MIN_CHAT_PANEL_SIZE = 25;
 const MIN_CODE_PANEL_SIZE = 20;
@@ -394,8 +405,11 @@ export function CodexApp() {
     [codeFiles, emptyFolders]
   );
   const [commitDialogOpen, setCommitDialogOpen] = useState(false);
+  const [newBranchDialogOpen, setNewBranchDialogOpen] = useState(false);
+  const [newBranchNameDraft, setNewBranchNameDraft] = useState("");
   const [selectedRepo, setSelectedRepo] = useState(REPOSITORIES[0]);
-  const [selectedBranch, setSelectedBranch] = useState(BRANCHES[0]);
+  const [branches, setBranches] = useState<string[]>(() => [...INITIAL_BRANCHES]);
+  const [selectedBranch, setSelectedBranch] = useState(INITIAL_BRANCHES[0]);
   const [chatPanelSize, setChatPanelSize] = useState(DEFAULT_CHAT_PANEL_SIZE);
   const [isTerminalVisible, setIsTerminalVisible] = useState(true);
   const [terminalHeight, setTerminalHeight] = useState(DEFAULT_TERMINAL_HEIGHT);
@@ -407,6 +421,28 @@ export function CodexApp() {
 
   const activeTerminal =
     terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
+
+  const handleNewBranchDialogOpenChange = useCallback((open: boolean) => {
+    setNewBranchDialogOpen(open);
+    if (!open) setNewBranchNameDraft("");
+  }, []);
+
+  const handleCreateBranch = useCallback(() => {
+    const name = newBranchNameDraft.trim();
+    if (!name) {
+      toast.error("Enter a branch name");
+      return;
+    }
+    if (branches.some((b) => b === name)) {
+      toast.error("A branch with that name already exists");
+      return;
+    }
+    setBranches((prev) => [...prev, name]);
+    setSelectedBranch(name);
+    setNewBranchDialogOpen(false);
+    setNewBranchNameDraft("");
+    toast.success(`Created and checked out ${name}`);
+  }, [newBranchNameDraft, branches]);
 
   useEffect(() => {
     if (terminals.length === 0) return;
@@ -785,16 +821,9 @@ export function CodexApp() {
           onDeleteThread={handleDeleteThread}
         />
 
-        <SidebarInset
-          style={{
-            display: "grid",
-            gridTemplateRows: "2.75rem 1fr",
-            height: "100%",
-            overflow: "hidden",
-          }}
-        >
+        <SidebarInset className="grid h-full grid-rows-[2.75rem_1fr] overflow-hidden bg-background">
           {/* ── App header ────────────────────────────────────────── */}
-          <header className="flex items-center gap-2 border-b border-border px-3">
+          <header className="flex items-center gap-2 border-b border-border bg-background px-3">
             <SidebarTrigger className="-ml-1" />
             <div className="flex items-center gap-2 text-[13px]">
               <span className="font-semibold text-foreground">
@@ -837,7 +866,7 @@ export function CodexApp() {
                   <DropdownMenuLabel>Branches</DropdownMenuLabel>
                   <DropdownMenuSeparator />
                   <DropdownMenuRadioGroup value={selectedBranch} onValueChange={setSelectedBranch}>
-                    {BRANCHES.map((branch) => (
+                    {branches.map((branch) => (
                       <DropdownMenuRadioItem key={branch} value={branch}>
                         <span className="truncate">{branch}</span>
                       </DropdownMenuRadioItem>
@@ -845,6 +874,15 @@ export function CodexApp() {
                   </DropdownMenuRadioGroup>
                 </DropdownMenuContent>
               </DropdownMenu>
+
+              <button
+                type="button"
+                onClick={() => setNewBranchDialogOpen(true)}
+                className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <GitBranchPlusIcon size={12} />
+                New branch
+              </button>
 
               <button
                 type="button"
@@ -955,7 +993,7 @@ export function CodexApp() {
                           {terminals.map((terminal) => (
                             <div
                               key={terminal.id}
-                              className="flex shrink-0 items-stretch rounded-md ring-1 ring-zinc-800/80"
+                              className="flex shrink-0 items-stretch rounded-md ring-1 ring-border"
                             >
                               <button
                                 type="button"
@@ -963,8 +1001,8 @@ export function CodexApp() {
                                 className={[
                                   "rounded-l-md px-2 py-1 text-[11px] font-medium transition-colors",
                                   activeTerminalId === terminal.id
-                                    ? "bg-zinc-800 text-zinc-100"
-                                    : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200",
+                                    ? "bg-accent text-accent-foreground"
+                                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
                                 ].join(" ")}
                               >
                                 {terminal.name}
@@ -975,7 +1013,7 @@ export function CodexApp() {
                                   aria-label={`Close ${terminal.name}`}
                                   title="Close terminal"
                                   onClick={(e) => handleDeleteTerminal(e, terminal.id)}
-                                  className="rounded-r-md border-l border-zinc-800 px-1.5 text-zinc-500 transition-colors hover:bg-red-950/40 hover:text-red-300"
+                                  className="rounded-r-md border-l border-border px-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
                                 >
                                   <Trash2Icon size={12} />
                                 </button>
@@ -991,7 +1029,7 @@ export function CodexApp() {
                             type="button"
                             aria-label="Create terminal"
                             onClick={handleCreateTerminal}
-                            className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+                            className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                           >
                             <PlusIcon size={14} />
                           </button>
@@ -1006,9 +1044,9 @@ export function CodexApp() {
                       <TerminalContent className="max-h-none min-h-0 flex-1 overflow-auto p-3 text-[12px]" />
                       <form
                         onSubmit={handleTerminalSubmit}
-                        className="flex shrink-0 items-center gap-2 border-t border-zinc-800 bg-zinc-950 px-3 py-2"
+                        className="flex shrink-0 items-center gap-2 border-t border-border bg-muted px-3 py-2"
                       >
-                        <span className="shrink-0 font-mono text-[12px] text-zinc-500">$</span>
+                        <span className="shrink-0 font-mono text-[12px] text-muted-foreground">$</span>
                         <input
                           type="text"
                           value={terminalCommandDraft}
@@ -1016,7 +1054,7 @@ export function CodexApp() {
                           placeholder="Run a command…"
                           autoComplete="off"
                           spellCheck={false}
-                          className="min-w-0 flex-1 bg-transparent font-mono text-[12px] text-zinc-100 outline-none placeholder:text-zinc-600"
+                          className="min-w-0 flex-1 bg-transparent font-mono text-[12px] text-foreground outline-none placeholder:text-muted-foreground"
                         />
                       </form>
                     </div>
@@ -1027,6 +1065,49 @@ export function CodexApp() {
           </div>
         </SidebarInset>
       </SidebarProvider>
+      <Dialog open={newBranchDialogOpen} onOpenChange={handleNewBranchDialogOpenChange}>
+        <DialogContent className="sm:max-w-md">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleCreateBranch();
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>Create new branch</DialogTitle>
+              <DialogDescription>
+                Name the branch and switch to it. This updates the workspace preview only.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="py-2">
+              <label className="sr-only" htmlFor="new-branch-name">
+                Branch name
+              </label>
+              <Input
+                id="new-branch-name"
+                value={newBranchNameDraft}
+                onChange={(e) => setNewBranchNameDraft(e.target.value)}
+                placeholder="e.g. feature/my-change"
+                autoComplete="off"
+                spellCheck={false}
+                autoFocus
+                className="font-mono text-[13px]"
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => handleNewBranchDialogOpenChange(false)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit">Create branch</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       <CommitDialog
         open={commitDialogOpen}
         onOpenChange={setCommitDialogOpen}
