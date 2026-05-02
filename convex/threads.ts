@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 
 /** Deletes all messages, their likedMessages rows, and the thread document. */
 export async function deleteThreadCascade(
@@ -266,6 +266,38 @@ export const saveProjectFile = mutation({
     }
 
     await ctx.db.patch(project._id, { updatedAt });
+  },
+});
+
+export const replaceProjectFilesInternal = internalMutation({
+  args: {
+    projectId: v.id("projects"),
+    files: v.array(projectFileValidator),
+  },
+  handler: async (ctx, args) => {
+    const existingFiles = await ctx.db
+      .query("projectFiles")
+      .withIndex("by_project", (q) => q.eq("projectId", args.projectId))
+      .take(1000);
+
+    for (const file of existingFiles) {
+      await ctx.db.delete(file._id);
+    }
+
+    const updatedAt = Date.now();
+    for (const file of args.files) {
+      await ctx.db.insert("projectFiles", {
+        projectId: args.projectId,
+        path: file.path,
+        content: file.content,
+        language: file.language,
+        ...(file.sha !== undefined ? { sha: file.sha } : {}),
+        ...(file.size !== undefined ? { size: file.size } : {}),
+        updatedAt,
+      });
+    }
+
+    await ctx.db.patch(args.projectId, { updatedAt });
   },
 });
 

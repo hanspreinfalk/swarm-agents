@@ -16,10 +16,21 @@ export type CodingAgentStatus =
   | "done"
   | "stopped";
 
+export type CodingAgentActivityKind =
+  | "system"
+  | "thinking"
+  | "tool"
+  | "file"
+  | "command"
+  | "text"
+  | "result"
+  | "error";
+
 export interface CodingAgentActivity {
   time: string;
   title: string;
   detail: string;
+  kind?: CodingAgentActivityKind;
 }
 
 export interface CodingAgentRun {
@@ -35,6 +46,8 @@ export interface CodingAgentRun {
   files: string[];
   updates: string[];
   activity: CodingAgentActivity[];
+  /** E2B sandbox ID — set once the sandbox has started */
+  sandboxId?: string;
 }
 
 export interface UserMessage {

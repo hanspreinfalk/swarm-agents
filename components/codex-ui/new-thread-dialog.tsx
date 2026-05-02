@@ -83,7 +83,9 @@ export function NewThreadDialog({
   onCreateWithProject,
   onCreateWithNew,
 }: NewThreadDialogProps) {
-  const [mode, setMode] = useState<"existing" | "projects" | "new">("existing");
+  const [mode, setMode] = useState<"existing" | "projects" | "new">("projects");
+  /** True after user clicks Load Repos in this dialog session (distinguishes “not fetched” from “fetched, empty”). */
+  const [reposFetchRequested, setReposFetchRequested] = useState(false);
 
   // Existing repo state
   const [repoSearch, setRepoSearch] = useState("");
@@ -102,11 +104,13 @@ export function NewThreadDialog({
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const repoSearchInputRef = useRef<HTMLInputElement>(null);
+  const projectSearchInputRef = useRef<HTMLInputElement>(null);
 
   // Reset on open before paint so focus / tabs are correct when the dialog traps focus
   useLayoutEffect(() => {
     if (!open) return;
-    setMode("existing");
+    setMode("projects");
+    setReposFetchRequested(false);
     setRepoSearch("");
     setSelectedRepo(null);
     setBranches([]);
@@ -204,7 +208,7 @@ export function NewThreadDialog({
         className="sm:max-w-lg"
         onOpenAutoFocus={(e) => {
           e.preventDefault();
-          queueMicrotask(() => repoSearchInputRef.current?.focus());
+          queueMicrotask(() => projectSearchInputRef.current?.focus());
         }}
       >
         <DialogHeader>
@@ -231,18 +235,89 @@ export function NewThreadDialog({
 
         <Tabs value={mode} onValueChange={(v) => setMode(v as "existing" | "projects" | "new")}>
           <TabsList className="w-full">
-            <TabsTrigger value="existing" className="flex-1 text-[13px]">
-              GitHub repo
-            </TabsTrigger>
             <TabsTrigger value="projects" className="flex-1 text-[13px]">
-              Existing project
+              Existing projects
+            </TabsTrigger>
+            <TabsTrigger value="existing" className="flex-1 text-[13px]">
+              GitHub repos
             </TabsTrigger>
             <TabsTrigger value="new" className="flex-1 text-[13px]">
               New repository
             </TabsTrigger>
           </TabsList>
 
-          {/* ── Existing repository ───────────────────────────── */}
+          <TabsContent value="projects" className="mt-4 space-y-4">
+            <div className="space-y-2">
+              <div className="relative">
+                <SearchIcon
+                  size={14}
+                  className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+                />
+                <Input
+                  ref={projectSearchInputRef}
+                  placeholder="Search projects…"
+                  value={projectSearch}
+                  onChange={(e) => setProjectSearch(e.target.value)}
+                  className="pl-8 text-[13px]"
+                />
+              </div>
+              <div className="px-0.5 text-[11px] text-muted-foreground">
+                {isLoadingProjects
+                  ? "Loading projects…"
+                  : `${projects.length} project${projects.length === 1 ? "" : "s"}`}
+              </div>
+            </div>
+
+            <ScrollArea className="h-52 rounded-md border bg-muted/20">
+              {isLoadingProjects ? (
+                <div className="flex h-full items-center justify-center p-8 text-[13px] text-muted-foreground">
+                  Loading projects…
+                </div>
+              ) : filteredProjects.length === 0 ? (
+                <div className="flex h-full items-center justify-center p-8 text-center text-[13px] text-muted-foreground">
+                  {projects.length === 0
+                    ? "No projects yet. Sync a GitHub repository first."
+                    : "No projects match your search."}
+                </div>
+              ) : (
+                <div className="p-1">
+                  {filteredProjects.map((project) => (
+                    <button
+                      key={project._id}
+                      type="button"
+                      onClick={() => setSelectedProjectId(project._id)}
+                      className={[
+                        "flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left text-[13px] transition-colors hover:bg-muted",
+                        selectedProjectId === project._id
+                          ? "bg-muted font-medium"
+                          : "text-foreground/90",
+                      ].join(" ")}
+                    >
+                      <span className="truncate">{project.name}</span>
+                      <span className="truncate text-[11px] text-muted-foreground">
+                        {project.repositoryFullName} · {project.branch}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </ScrollArea>
+
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void handleProjectSubmit()}
+                disabled={!selectedProjectId || isSubmitting}
+              >
+                {isSubmitting ? "Creating…" : "Start thread"}
+              </Button>
+            </DialogFooter>
+          </TabsContent>
+
+          {/* ── Existing repository (GitHub) ───────────────────── */}
           <TabsContent value="existing" className="mt-4 space-y-4">
             <div className="space-y-2">
               <div className="relative">
@@ -255,26 +330,34 @@ export function NewThreadDialog({
                   placeholder="Search repositories…"
                   value={repoSearch}
                   onChange={(e) => setRepoSearch(e.target.value)}
+                  disabled={!reposFetchRequested || isLoadingRepos}
                   className="pl-8 text-[13px]"
                 />
               </div>
-              <div className="flex items-center justify-between px-0.5">
+              <div className="flex flex-wrap items-center justify-between gap-2 px-0.5">
                 <span className="text-[11px] text-muted-foreground">
-                  {isLoadingRepos
-                    ? "Loading…"
-                    : repoError
-                      ? "Failed to load"
-                      : `${repos.length} repositor${repos.length === 1 ? "y" : "ies"}`}
+                  {!reposFetchRequested
+                    ? "Repositories are not loaded yet."
+                    : isLoadingRepos
+                      ? "Loading…"
+                      : repoError
+                        ? "Failed to load"
+                        : `${repos.length} repositor${repos.length === 1 ? "y" : "ies"}`}
                 </span>
-                <button
+                <Button
                   type="button"
-                  onClick={onRefreshRepos}
+                  variant="secondary"
+                  size="sm"
+                  className="h-8 gap-1.5 text-[12px]"
+                  onClick={() => {
+                    setReposFetchRequested(true);
+                    onRefreshRepos();
+                  }}
                   disabled={isLoadingRepos}
-                  className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <RefreshCwIcon size={11} className={isLoadingRepos ? "animate-spin" : ""} />
-                  Refresh
-                </button>
+                  <RefreshCwIcon size={13} className={isLoadingRepos ? "animate-spin" : ""} />
+                  Load Repos
+                </Button>
               </div>
             </div>
 
@@ -285,7 +368,14 @@ export function NewThreadDialog({
             )}
 
             <ScrollArea className="h-52 rounded-md border bg-muted/20">
-              {isLoadingRepos ? (
+              {!reposFetchRequested ? (
+                <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
+                  <p className="text-[13px] text-muted-foreground">
+                    Click <span className="font-medium text-foreground">Load Repos</span> to fetch
+                    repositories from GitHub.
+                  </p>
+                </div>
+              ) : isLoadingRepos ? (
                 <div className="flex h-full items-center justify-center p-8 text-[13px] text-muted-foreground">
                   Loading repositories…
                 </div>
@@ -372,76 +462,6 @@ export function NewThreadDialog({
                 type="button"
                 onClick={() => void handleExistingSubmit()}
                 disabled={!selectedRepo || !selectedBranch || isSubmitting || isLoadingBranches}
-              >
-                {isSubmitting ? "Creating…" : "Start thread"}
-              </Button>
-            </DialogFooter>
-          </TabsContent>
-
-          <TabsContent value="projects" className="mt-4 space-y-4">
-            <div className="space-y-2">
-              <div className="relative">
-                <SearchIcon
-                  size={14}
-                  className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
-                />
-                <Input
-                  placeholder="Search projects…"
-                  value={projectSearch}
-                  onChange={(e) => setProjectSearch(e.target.value)}
-                  className="pl-8 text-[13px]"
-                />
-              </div>
-              <div className="px-0.5 text-[11px] text-muted-foreground">
-                {isLoadingProjects
-                  ? "Loading projects…"
-                  : `${projects.length} project${projects.length === 1 ? "" : "s"}`}
-              </div>
-            </div>
-
-            <ScrollArea className="h-52 rounded-md border bg-muted/20">
-              {isLoadingProjects ? (
-                <div className="flex h-full items-center justify-center p-8 text-[13px] text-muted-foreground">
-                  Loading projects…
-                </div>
-              ) : filteredProjects.length === 0 ? (
-                <div className="flex h-full items-center justify-center p-8 text-center text-[13px] text-muted-foreground">
-                  {projects.length === 0
-                    ? "No projects yet. Sync a GitHub repository first."
-                    : "No projects match your search."}
-                </div>
-              ) : (
-                <div className="p-1">
-                  {filteredProjects.map((project) => (
-                    <button
-                      key={project._id}
-                      type="button"
-                      onClick={() => setSelectedProjectId(project._id)}
-                      className={[
-                        "flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left text-[13px] transition-colors hover:bg-muted",
-                        selectedProjectId === project._id
-                          ? "bg-muted font-medium"
-                          : "text-foreground/90",
-                      ].join(" ")}
-                    >
-                      <span className="truncate">{project.name}</span>
-                      <span className="truncate text-[11px] text-muted-foreground">
-                        {project.repositoryFullName} · {project.branch}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </ScrollArea>
-
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                onClick={() => void handleProjectSubmit()}
-                disabled={!selectedProjectId || isSubmitting}
               >
                 {isSubmitting ? "Creating…" : "Start thread"}
               </Button>

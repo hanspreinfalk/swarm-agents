@@ -1,15 +1,5 @@
 "use client";
 
-import {
-  Terminal,
-  TerminalActions,
-  TerminalClearButton,
-  TerminalContent,
-  TerminalCopyButton,
-  TerminalHeader,
-  TerminalStatus,
-  TerminalTitle,
-} from "@/components/ai-elements/terminal";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -37,12 +27,10 @@ import {
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   ChevronDownIcon,
-  EraserIcon,
   GitBranchIcon,
   GitBranchPlusIcon,
   PlusIcon,
   RefreshCwIcon,
-  Trash2Icon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -56,7 +44,13 @@ import { CodePanel } from "./code-panel";
 import { NewThreadDialog } from "./new-thread-dialog";
 import type { ExistingProject } from "./new-thread-dialog";
 import { CODE_FILES } from "./data";
-import type { AssistantMessage, ChatMessage, CodeFile, UserMessage } from "./types";
+import type {
+  AssistantMessage,
+  ChatMessage,
+  CodeFile,
+  CodingAgentRun,
+  UserMessage,
+} from "./types";
 import {
   fileCreateConflict,
   folderCreateConflict,
@@ -68,34 +62,6 @@ import {
 const DEFAULT_CHAT_PANEL_SIZE = 44;
 const MIN_CHAT_PANEL_SIZE = 25;
 const MIN_CODE_PANEL_SIZE = 20;
-const DEFAULT_TERMINAL_HEIGHT = 220;
-const MIN_TERMINAL_HEIGHT = 120;
-const MIN_EDITOR_HEIGHT = 260;
-
-const TERMINAL_OUTPUT = `$ npm run dev
-
-> swarm-agents@0.1.0 dev
-> next dev
-
-▲ Next.js 16.2.4 (Turbopack)
-- Local:        http://localhost:3000
-- Network:      http://10.107.0.144:3000
-
-✓ Ready in 174ms
-○ Compiling / ...
-✓ Compiled / in 612ms
-GET / 200 in 38ms
-`;
-
-const INITIAL_TERMINALS = [
-  {
-    id: "terminal-1",
-    name: "Terminal 1",
-    output: TERMINAL_OUTPUT,
-  },
-];
-
-const CLEAR_SENTINEL = "__CLEAR__";
 
 type GithubRepository = {
   fullName: string;
@@ -117,52 +83,27 @@ type GithubFilePayload = {
   size?: number;
 };
 
-function simulateShellResponse(cmd: string): string {
-  const trimmed = cmd.trim();
-  const lower = trimmed.toLowerCase();
-  if (!trimmed) return "";
-  if (lower === "clear") return CLEAR_SENTINEL;
-  if (lower === "help") {
-    return [
-      "Demo shell — try:",
-      "  help, clear, pwd, ls, echo <text>, npm run dev",
-    ].join("\n");
-  }
-  if (lower === "pwd") {
-    return "/Users/hanspreinfalk/Documents/NextJs/swarm-agents";
-  }
-  if (lower === "ls" || lower === "ls -la" || lower === "ls -l") {
-    return ["README.md", "app/", "components/", "package.json", "tsconfig.json"].join("\n");
-  }
-  if (lower.startsWith("echo ")) {
-    return trimmed.slice(5).trim();
-  }
-  if (lower === "npm run dev" || lower === "npm start") {
-    return [
-      "> swarm-agents@0.1.0 dev",
-      "> next dev",
-      "",
-      "✓ Ready — open http://localhost:3000",
-    ].join("\n");
-  }
-  const first = trimmed.split(/\s+/)[0] ?? trimmed;
-  return `sh: ${first}: command not found (demo shell)`;
-}
-
-function appendTerminalOutput(
-  previous: string,
-  cmd: string,
-  response: string
-): string {
-  if (response === CLEAR_SENTINEL) {
-    return "$ ";
-  }
-  const body = response ? `${response}\n` : "";
-  if (previous.endsWith("$ ")) {
-    return `${previous.slice(0, -2)}${cmd}\n${body}$ `;
-  }
-  return `${previous}\n$ ${cmd}\n${body}$ `;
-}
+type PreviewStreamEvent =
+  | {
+      type: "progress";
+      stage: string;
+      message: string;
+      filesProcessed?: number;
+      filesTotal?: number;
+    }
+  | {
+      type: "ready";
+      url: string;
+      sandboxId: string;
+    }
+  | {
+      type: "error";
+      error: string;
+    }
+  | {
+      type: "terminal";
+      chunk: string;
+    };
 
 async function postGithub<T>(body: Record<string, unknown>): Promise<T> {
   const response = await fetch("/api/github", {
@@ -251,10 +192,97 @@ export function CodexApp() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [isCommitting, setIsCommitting] = useState(false);
   const [newThreadDialogOpen, setNewThreadDialogOpen] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
+  const [previewStage, setPreviewStage] = useState<string>("idle");
+  const [previewStatusMessage, setPreviewStatusMessage] = useState<string>("");
+  const [previewFilesProcessed, setPreviewFilesProcessed] = useState<number>(0);
+  const [previewFilesTotal, setPreviewFilesTotal] = useState<number>(0);
+  const [previewTerminalBuffer, setPreviewTerminalBuffer] = useState<string>("");
   const saveTimersRef = useRef<Record<string, number>>({});
   const projectsQuery = useQuery(api.threads.listProjects);
   const projects = (projectsQuery ?? []) as ExistingProject[];
   const isLoadingProjects = projectsQuery === undefined;
+
+  // ── Swarm runs ───────────────────────────────────────────────────
+  const swarmRunsQuery = useQuery(
+    api.swarm.listSwarmRuns,
+    activeThreadId ? { threadId: activeThreadId as Id<"threads"> } : "skip"
+  );
+  const latestSwarmRun = swarmRunsQuery?.[0] ?? null;
+
+  const spawnedAgentsQuery = useQuery(
+    api.swarm.listSpawnedAgents,
+    latestSwarmRun ? { swarmRunId: latestSwarmRun._id } : "skip"
+  );
+  const spawnedAgents = spawnedAgentsQuery ?? [];
+
+  // Subscribe to project files so swarm results auto-apply to the editor
+  const projectFilesQuery = useQuery(
+    api.threads.listProjectFiles,
+    selectedProjectId ? { projectId: selectedProjectId as Id<"projects"> } : "skip"
+  );
+
+  // When a swarm run completes, sync project files to the code editor
+  const prevSwarmStatusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const currentStatus = latestSwarmRun?.status ?? null;
+    const prevStatus = prevSwarmStatusRef.current;
+    prevSwarmStatusRef.current = currentStatus;
+
+    if (
+      currentStatus === "done" &&
+      (prevStatus === "merging" || prevStatus === "running") &&
+      projectFilesQuery &&
+      projectFilesQuery.length > 0
+    ) {
+      setCodeFiles((prev) => {
+        const next = { ...prev };
+        for (const f of projectFilesQuery) {
+          next[f.path] = { content: f.content, language: f.language };
+        }
+        return next;
+      });
+      toast.success(
+        `Swarm complete — ${projectFilesQuery.length} files updated in editor.`
+      );
+    }
+  }, [latestSwarmRun?.status, projectFilesQuery]);
+
+  // Map Convex spawnedAgents to CodingAgentRun[] for the chat UI
+  const swarmAgentRuns: CodingAgentRun[] = useMemo(() => {
+    if (!latestSwarmRun) return [];
+    return spawnedAgents.map((agent) => {
+      const durationSeconds =
+        agent.startedAt && agent.completedAt
+          ? Math.round((agent.completedAt - agent.startedAt) / 1000)
+          : agent.startedAt
+            ? Math.round((Date.now() - agent.startedAt) / 1000)
+            : 0;
+      const uiStatus =
+        agent.status === "queued"
+          ? "queued"
+          : agent.status === "running"
+            ? "running"
+            : agent.status === "done"
+              ? "done"
+              : "stopped";
+      return {
+        id: agent._id,
+        name: agent.name,
+        task: agent.task,
+        status: uiStatus,
+        progress: agent.progress,
+        durationSeconds,
+        tokensUsed: agent.tokensUsed,
+        files: agent.assignedFiles,
+        updates: agent.result ? [agent.result] : [],
+        activity: agent.activity,
+        sandboxId: agent.sandboxId,
+      } satisfies CodingAgentRun;
+    });
+  }, [latestSwarmRun, spawnedAgents]);
 
   const handleCodeFileChange = useCallback(
     (path: string, content: string) => {
@@ -473,17 +501,130 @@ export function CodexApp() {
     },
     [codeFiles, emptyFolders]
   );
+
+  const handleRequestPreview = useCallback(async () => {
+    const files = Object.entries(codeFiles).map(([path, file]) => ({
+      path,
+      content: file.content,
+    }));
+    if (files.length === 0) {
+      setPreviewError("No files available to preview.");
+      setPreviewUrl(null);
+      return;
+    }
+
+    setIsPreviewLoading(true);
+    setPreviewStage("preparing");
+    setPreviewStatusMessage("Preparing preview request...");
+    setPreviewFilesProcessed(0);
+    setPreviewFilesTotal(files.length);
+    setPreviewTerminalBuffer("$ preview start\n");
+    setPreviewError(null);
+    let resolvedPreviewUrl: string | null = null;
+    try {
+      const response = await fetch("/api/e2b/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectKey: selectedProjectId ?? `${selectedRepo ?? "local"}:${selectedBranch ?? "main"}`,
+          files,
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string };
+        throw new Error(payload.error ?? "Could not start preview sandbox.");
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("Preview response stream was not available.");
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let done = false;
+
+      while (!done) {
+        const chunk = await reader.read();
+        done = chunk.done;
+        buffer += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !done });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          let event: PreviewStreamEvent;
+          try {
+            event = JSON.parse(trimmed) as PreviewStreamEvent;
+          } catch {
+            continue;
+          }
+
+          if (event.type === "progress") {
+            setPreviewStage(event.stage);
+            setPreviewStatusMessage(event.message);
+            if (typeof event.filesProcessed === "number") {
+              setPreviewFilesProcessed(event.filesProcessed);
+            }
+            if (typeof event.filesTotal === "number") {
+              setPreviewFilesTotal(event.filesTotal);
+            }
+            continue;
+          }
+
+          if (event.type === "terminal") {
+            setPreviewTerminalBuffer((previous) => {
+              const next = `${previous}${event.chunk}`;
+              const maxChars = 80_000;
+              return next.length > maxChars ? next.slice(next.length - maxChars) : next;
+            });
+            continue;
+          }
+
+          if (event.type === "ready") {
+            resolvedPreviewUrl = event.url;
+            setPreviewUrl(event.url);
+            setPreviewStage("ready");
+            setPreviewStatusMessage("Preview is ready.");
+            continue;
+          }
+
+          if (event.type === "error") {
+            throw new Error(event.error || "Could not start preview sandbox.");
+          }
+        }
+      }
+
+      if (!resolvedPreviewUrl) {
+        throw new Error("Preview did not return a URL.");
+      }
+
+      setPreviewError(null);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Could not start preview sandbox.";
+      setPreviewStage("error");
+      setPreviewStatusMessage("");
+      setPreviewError(message);
+      // Only clear the URL if this attempt never produced one — if the
+      // sandbox was already running and the stream just got interrupted,
+      // keep the existing URL so the iframe stays visible.
+      if (!resolvedPreviewUrl) {
+        setPreviewUrl(null);
+      }
+      toast.error(message);
+    } finally {
+      setIsPreviewLoading(false);
+    }
+  }, [codeFiles, selectedBranch, selectedProjectId, selectedRepo]);
   const [commitDialogOpen, setCommitDialogOpen] = useState(false);
   const [newBranchDialogOpen, setNewBranchDialogOpen] = useState(false);
   const [newBranchNameDraft, setNewBranchNameDraft] = useState("");
   const [chatPanelSize, setChatPanelSize] = useState(DEFAULT_CHAT_PANEL_SIZE);
-  const [isTerminalVisible, setIsTerminalVisible] = useState(true);
-  const [terminalHeight, setTerminalHeight] = useState(DEFAULT_TERMINAL_HEIGHT);
-  const [terminals, setTerminals] = useState(INITIAL_TERMINALS);
-  const [activeTerminalId, setActiveTerminalId] = useState(INITIAL_TERMINALS[0].id);
-  const [terminalCommandDraft, setTerminalCommandDraft] = useState("");
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
-  const rightPanelRef = useRef<HTMLDivElement | null>(null);
 
   const repositoryFilesQuery = useQuery(
     api.threads.listProjectFiles,
@@ -518,13 +659,6 @@ export function CodexApp() {
         setIsLoadingRepos(false);
       });
   }, []);
-
-  // Load repos lazily when the new-thread dialog opens
-  useEffect(() => {
-    if (newThreadDialogOpen) {
-      loadRepos();
-    }
-  }, [newThreadDialogOpen, loadRepos]);
 
   useEffect(() => {
     if (!selectedRepo) return;
@@ -593,9 +727,6 @@ export function CodexApp() {
       }
     };
   }, []);
-
-  const activeTerminal =
-    terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
 
   const syncRepositoryForProject = useCallback(
     async (projectId: string, repositoryFullName: string, branch: string) => {
@@ -854,13 +985,6 @@ export function CodexApp() {
     ]
   );
 
-  useEffect(() => {
-    if (terminals.length === 0) return;
-    if (!terminals.some((t) => t.id === activeTerminalId)) {
-      queueMicrotask(() => setActiveTerminalId(terminals[0].id));
-    }
-  }, [terminals, activeTerminalId]);
-
   // Auto-select the first thread when threads load
   useEffect(() => {
     if (!activeThreadId && threads.length > 0) {
@@ -869,6 +993,10 @@ export function CodexApp() {
   }, [threads, activeThreadId]);
 
   // ── Build the chat messages for display ──────────────────────────
+  const isSwarmActive =
+    latestSwarmRun !== null &&
+    (latestSwarmRun.status === "running" || latestSwarmRun.status === "merging");
+
   const chatMessages: ChatMessage[] = [
     ...dbMessages.map((m): ChatMessage => {
       if (m.role === "user") {
@@ -879,14 +1007,20 @@ export function CodexApp() {
         };
         return userMsg;
       }
+      const isLast = m._id === lastAssistantMessageId;
       const assistantMsg: AssistantMessage = {
         id: m._id,
         role: "assistant",
         isThinkingStreaming: false,
         text: m.content,
         tools: [],
+        // Attach swarm agents to the last persisted assistant message when swarm is done
+        subAgents:
+          isLast && !isStreaming && swarmAgentRuns.length > 0
+            ? swarmAgentRuns
+            : undefined,
         feedback: feedbackByMessageId.get(m._id),
-        canRegenerate: m._id === lastAssistantMessageId,
+        canRegenerate: isLast,
       };
       return assistantMsg;
     }),
@@ -899,10 +1033,14 @@ export function CodexApp() {
             isThinkingStreaming: isStreaming && !streamingContent,
             text: streamingContent,
             tools: [],
+            // Show swarm agents while streaming (swarm is running in parallel)
+            subAgents: swarmAgentRuns.length > 0 ? swarmAgentRuns : undefined,
           } as AssistantMessage,
         ] as ChatMessage[])
       : []),
   ];
+
+  void isSwarmActive;
 
   // ── Thread management ────────────────────────────────────────────
   const handleNewThread = useCallback(() => {
@@ -1023,7 +1161,9 @@ export function CodexApp() {
   const streamAssistantReply = useCallback(
     async (
       threadId: Id<"threads">,
-      apiMessages: Array<{ role: "user" | "assistant"; content: string }>
+      apiMessages: Array<{ role: "user" | "assistant"; content: string }>,
+      currentProjectId: string | null,
+      currentProjectFiles: Array<{ path: string; content: string; language: string }>
     ) => {
       setIsStreaming(true);
       setStreamingContent("");
@@ -1035,7 +1175,13 @@ export function CodexApp() {
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: apiMessages, model: selectedModel }),
+          body: JSON.stringify({
+            messages: apiMessages,
+            model: selectedModel,
+            threadId,
+            projectId: currentProjectId ?? undefined,
+            projectFiles: currentProjectFiles,
+          }),
           signal: controller.signal,
         });
 
@@ -1058,7 +1204,7 @@ export function CodexApp() {
         await addMessageMutation({
           threadId,
           role: "assistant",
-          content: fullContent,
+          content: fullContent || "(Swarm agents completed — see the agent timeline above.)",
         });
       } catch (err) {
         if ((err as Error).name !== "AbortError") {
@@ -1111,10 +1257,23 @@ export function CodexApp() {
         { role: "user" as const, content: text },
       ];
 
-      await streamAssistantReply(threadId as Id<"threads">, apiMessages);
+      // Build project files array to send for swarm context
+      const currentProjectFiles = Object.entries(codeFiles).map(([path, file]) => ({
+        path,
+        content: file.content,
+        language: file.language,
+      }));
+
+      await streamAssistantReply(
+        threadId as Id<"threads">,
+        apiMessages,
+        selectedProjectId,
+        currentProjectFiles
+      );
     },
     [
       activeThreadId,
+      codeFiles,
       dbMessages,
       selectedModel,
       selectedProjectId,
@@ -1176,13 +1335,25 @@ export function CodexApp() {
         toast.error("Could not remove the old reply.");
         return;
       }
-      await streamAssistantReply(activeThreadId as Id<"threads">, apiMessages);
+      const currentProjectFiles = Object.entries(codeFiles).map(([path, file]) => ({
+        path,
+        content: file.content,
+        language: file.language,
+      }));
+      await streamAssistantReply(
+        activeThreadId as Id<"threads">,
+        apiMessages,
+        selectedProjectId,
+        currentProjectFiles
+      );
     },
     [
       activeThreadId,
+      codeFiles,
       dbMessages,
       deleteAssistantMessageMutation,
       isStreaming,
+      selectedProjectId,
       streamAssistantReply,
     ]
   );
@@ -1218,76 +1389,6 @@ export function CodexApp() {
       window.addEventListener("pointerup", handlePointerUp);
     },
     []
-  );
-
-  const handleTerminalResizeStart = useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>) => {
-      const panel = rightPanelRef.current;
-      if (!panel) return;
-      event.currentTarget.setPointerCapture(event.pointerId);
-      const startY = event.clientY;
-      const startHeight = terminalHeight;
-      const panelHeight = panel.getBoundingClientRect().height;
-
-      const handlePointerMove = (moveEvent: PointerEvent) => {
-        const nextHeight = startHeight + startY - moveEvent.clientY;
-        const maxHeight = Math.max(MIN_TERMINAL_HEIGHT, panelHeight - MIN_EDITOR_HEIGHT);
-        setTerminalHeight(Math.min(Math.max(nextHeight, MIN_TERMINAL_HEIGHT), maxHeight));
-      };
-      const handlePointerUp = () => {
-        window.removeEventListener("pointermove", handlePointerMove);
-        window.removeEventListener("pointerup", handlePointerUp);
-      };
-      window.addEventListener("pointermove", handlePointerMove);
-      window.addEventListener("pointerup", handlePointerUp);
-    },
-    [terminalHeight]
-  );
-
-  const handleCreateTerminal = useCallback(() => {
-    const id = `terminal-${Date.now()}`;
-    setTerminals((currentTerminals) => [
-      ...currentTerminals,
-      { id, name: `Terminal ${currentTerminals.length + 1}`, output: "$ " },
-    ]);
-    setActiveTerminalId(id);
-    setIsTerminalVisible(true);
-  }, []);
-
-  const handleDeleteTerminal = useCallback(
-    (event: React.MouseEvent, terminalId: string) => {
-      event.preventDefault();
-      event.stopPropagation();
-      setTerminals((prev) => {
-        if (prev.length <= 1) return prev;
-        return prev.filter((t) => t.id !== terminalId);
-      });
-    },
-    []
-  );
-
-  const handleClearActiveTerminal = useCallback(() => {
-    setTerminals((prev) =>
-      prev.map((t) => (t.id === activeTerminalId ? { ...t, output: "$ " } : t))
-    );
-  }, [activeTerminalId]);
-
-  const handleTerminalSubmit = useCallback(
-    (event: React.FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      const cmd = terminalCommandDraft.trim();
-      setTerminalCommandDraft("");
-      if (!cmd) return;
-      const id = activeTerminalId;
-      const response = simulateShellResponse(cmd);
-      setTerminals((prev) =>
-        prev.map((t) => {
-          if (t.id !== id) return t;
-          return { ...t, output: appendTerminalOutput(t.output, cmd, response) };
-        })
-      );
-    },
-    [activeTerminalId, terminalCommandDraft]
   );
 
   return (
@@ -1466,12 +1567,7 @@ export function CodexApp() {
             </button>
 
             <div
-              ref={rightPanelRef}
               style={{
-                display: "grid",
-                gridTemplateRows: isTerminalVisible
-                  ? `minmax(0, 1fr) 7px ${terminalHeight}px`
-                  : "minmax(0, 1fr)",
                 minWidth: 0,
                 minHeight: 0,
                 overflow: "hidden",
@@ -1487,101 +1583,17 @@ export function CodexApp() {
                 onAddFolder={handleAddFolder}
                 onDeletePath={handleDeletePath}
                 onRenamePath={handleRenamePath}
-                isTerminalVisible={isTerminalVisible}
-                onToggleTerminal={() => setIsTerminalVisible((visible) => !visible)}
+                previewUrl={previewUrl}
+                previewError={previewError}
+                isPreviewLoading={isPreviewLoading}
+                previewStage={previewStage}
+                previewStatusMessage={previewStatusMessage}
+                previewFilesProcessed={previewFilesProcessed}
+                previewFilesTotal={previewFilesTotal}
+                previewTerminalBuffer={previewTerminalBuffer}
+                onClearPreviewTerminal={() => setPreviewTerminalBuffer("")}
+                onRequestPreview={handleRequestPreview}
               />
-
-              {isTerminalVisible && (
-                <>
-                  <button
-                    type="button"
-                    aria-label="Resize terminal"
-                    onPointerDown={handleTerminalResizeStart}
-                    className="group relative cursor-row-resize bg-border/80 outline-none transition-colors hover:bg-border focus-visible:bg-border"
-                  >
-                    <span className="absolute left-1/2 top-1/2 h-1 w-10 -translate-x-1/2 -translate-y-1/2 rounded-full bg-muted-foreground/20 transition-colors group-hover:bg-muted-foreground/40" />
-                  </button>
-
-                  <Terminal
-                    output={activeTerminal?.output ?? ""}
-                    onClear={handleClearActiveTerminal}
-                    className="h-full rounded-none border-x-0 border-b-0"
-                  >
-                    <TerminalHeader className="gap-2 px-3 py-2">
-                      <div className="flex min-w-0 flex-1 items-center gap-2">
-                        <TerminalTitle className="shrink-0" />
-                        <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
-                          {terminals.map((terminal) => (
-                            <div
-                              key={terminal.id}
-                              className="flex shrink-0 items-stretch rounded-md ring-1 ring-border"
-                            >
-                              <button
-                                type="button"
-                                onClick={() => setActiveTerminalId(terminal.id)}
-                                className={[
-                                  "rounded-l-md px-2 py-1 text-[11px] font-medium transition-colors",
-                                  activeTerminalId === terminal.id
-                                    ? "bg-accent text-accent-foreground"
-                                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                                ].join(" ")}
-                              >
-                                {terminal.name}
-                              </button>
-                              {terminals.length > 1 && (
-                                <button
-                                  type="button"
-                                  aria-label={`Close ${terminal.name}`}
-                                  title="Close terminal"
-                                  onClick={(e) => handleDeleteTerminal(e, terminal.id)}
-                                  className="rounded-r-md border-l border-border px-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-                                >
-                                  <Trash2Icon size={12} />
-                                </button>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <TerminalStatus />
-                        <TerminalActions>
-                          <button
-                            type="button"
-                            aria-label="Create terminal"
-                            onClick={handleCreateTerminal}
-                            className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                          >
-                            <PlusIcon size={14} />
-                          </button>
-                          <TerminalCopyButton />
-                          <TerminalClearButton aria-label="Clear output">
-                            <EraserIcon size={14} />
-                          </TerminalClearButton>
-                        </TerminalActions>
-                      </div>
-                    </TerminalHeader>
-                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                      <TerminalContent className="max-h-none min-h-0 flex-1 overflow-auto p-3 text-[12px]" />
-                      <form
-                        onSubmit={handleTerminalSubmit}
-                        className="flex shrink-0 items-center gap-2 border-t border-border bg-muted px-3 py-2"
-                      >
-                        <span className="shrink-0 font-mono text-[12px] text-muted-foreground">$</span>
-                        <input
-                          type="text"
-                          value={terminalCommandDraft}
-                          onChange={(e) => setTerminalCommandDraft(e.target.value)}
-                          placeholder="Run a command…"
-                          autoComplete="off"
-                          spellCheck={false}
-                          className="min-w-0 flex-1 bg-transparent font-mono text-[12px] text-foreground outline-none placeholder:text-muted-foreground"
-                        />
-                      </form>
-                    </div>
-                  </Terminal>
-                </>
-              )}
             </div>
           </div>}
         </SidebarInset>

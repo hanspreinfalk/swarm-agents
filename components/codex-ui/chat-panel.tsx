@@ -59,12 +59,21 @@ import {
   ThumbsDownIcon,
   ThumbsUpIcon,
   XIcon,
+  BrainIcon,
+  CodeIcon,
+  FileIcon,
+  TerminalIcon,
+  WrenchIcon,
+  XCircleIcon,
+  ZapIcon,
 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelSelectorInput_ } from "./model-selector-input";
 import type {
   AssistantMessage,
   ChatMessage,
+  CodingAgentActivity,
+  CodingAgentActivityKind,
   CodingAgentRun,
   CodingAgentStatus,
   ToolEntry,
@@ -128,6 +137,32 @@ function formatTokenCount(n: number): string {
   return `${text.replace(/\.0$/, "")}k`;
 }
 
+function SandboxIdBadge({ sandboxId }: { sandboxId: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      title={`E2B sandbox: ${sandboxId}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        void navigator.clipboard.writeText(sandboxId).then(() => {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1800);
+        });
+      }}
+      className="mt-1.5 inline-flex items-center gap-1.5 rounded-md bg-muted/60 px-2 py-0.5 font-mono text-[10px] text-muted-foreground ring-1 ring-border transition-colors hover:bg-muted hover:text-foreground"
+    >
+      <span className="opacity-60">sandbox</span>
+      {sandboxId.slice(0, 16)}…
+      {copied ? (
+        <CheckIcon size={10} className="text-green-600" />
+      ) : (
+        <CopyIcon size={10} className="opacity-50" />
+      )}
+    </button>
+  );
+}
+
 function AgentStatusIcon({ status }: { status: CodingAgentStatus }) {
   if (status === "done") {
     return <CheckIcon size={13} className="text-green-600" />;
@@ -141,11 +176,64 @@ function AgentStatusIcon({ status }: { status: CodingAgentStatus }) {
   return <CircleDotIcon size={13} className="text-muted-foreground" />;
 }
 
+// ─── Per-kind icon + colours ──────────────────────────────────────
+
+const kindMeta: Record<
+  CodingAgentActivityKind,
+  { Icon: React.ElementType; iconCls: string; rowCls: string; labelCls: string }
+> = {
+  system:   { Icon: ZapIcon,      iconCls: "text-muted-foreground", rowCls: "border-border/60 bg-muted/20",           labelCls: "text-muted-foreground" },
+  thinking: { Icon: BrainIcon,    iconCls: "text-violet-500",       rowCls: "border-violet-200/60 bg-violet-50/40 dark:border-violet-500/20 dark:bg-violet-500/5", labelCls: "text-violet-700 dark:text-violet-300" },
+  tool:     { Icon: WrenchIcon,   iconCls: "text-amber-500",        rowCls: "border-amber-200/60 bg-amber-50/40 dark:border-amber-500/20 dark:bg-amber-500/5",     labelCls: "text-amber-700 dark:text-amber-300" },
+  file:     { Icon: FileIcon,     iconCls: "text-blue-500",         rowCls: "border-blue-200/60 bg-blue-50/40 dark:border-blue-500/20 dark:bg-blue-500/5",         labelCls: "text-blue-700 dark:text-blue-300" },
+  command:  { Icon: TerminalIcon, iconCls: "text-emerald-500",      rowCls: "border-emerald-200/60 bg-emerald-50/40 dark:border-emerald-500/20 dark:bg-emerald-500/5", labelCls: "text-emerald-700 dark:text-emerald-300" },
+  text:     { Icon: CodeIcon,     iconCls: "text-foreground/50",    rowCls: "border-border/60 bg-muted/10",           labelCls: "text-foreground/80" },
+  result:   { Icon: CheckIcon,    iconCls: "text-green-600",        rowCls: "border-green-200/60 bg-green-50/40 dark:border-green-500/20 dark:bg-green-500/5",     labelCls: "text-green-700 dark:text-green-300" },
+  error:    { Icon: XCircleIcon,  iconCls: "text-red-500",          rowCls: "border-red-200/60 bg-red-50/40 dark:border-red-500/20 dark:bg-red-500/5",             labelCls: "text-red-700 dark:text-red-300" },
+};
+
+function ActivityRow({ entry }: { entry: CodingAgentActivity }) {
+  const kind = entry.kind ?? "text";
+  const { Icon, iconCls, rowCls, labelCls } = kindMeta[kind];
+
+  return (
+    <div className={`rounded-lg border px-2.5 py-1.5 ${rowCls}`}>
+      <div className="flex items-start gap-2">
+        <Icon size={12} className={`mt-0.5 shrink-0 ${iconCls}`} />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+            <span className={`text-[11px] font-semibold leading-tight ${labelCls}`}>
+              {entry.title}
+            </span>
+            <span className="font-mono text-[10px] tabular-nums text-muted-foreground/60">
+              {entry.time}
+            </span>
+          </div>
+          {entry.detail && (
+            <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground break-all">
+              {entry.detail}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AgentConversation({ agent }: { agent: CodingAgentRun }) {
-  const finalUpdate = agent.updates[agent.updates.length - 1];
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const isRunning = agent.status === "running" || agent.status === "reviewing";
+
+  // Auto-scroll to bottom while agent is running
+  useEffect(() => {
+    if (isRunning && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [agent.activity.length, isRunning]);
 
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-gradient-to-b from-muted/30 to-background shadow-sm">
+      {/* Header */}
       <div className="border-b border-border bg-background/80 px-3 py-2.5 backdrop-blur-sm">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
@@ -154,6 +242,15 @@ function AgentConversation({ agent }: { agent: CodingAgentRun }) {
             </p>
             <p className="text-[11px] text-muted-foreground">
               {agent.files.length} file{agent.files.length === 1 ? "" : "s"} scoped
+              {isRunning && (
+                <span className="ml-2 inline-flex items-center gap-1 text-blue-600 dark:text-blue-400">
+                  <span className="relative flex size-1.5">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-500 opacity-75" />
+                    <span className="relative inline-flex size-1.5 rounded-full bg-blue-600" />
+                  </span>
+                  live
+                </span>
+              )}
             </p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-1.5">
@@ -177,75 +274,70 @@ function AgentConversation({ agent }: { agent: CodingAgentRun }) {
         </div>
       </div>
 
-      <div className="space-y-4 p-3">
-        <div className="flex items-start gap-3">
-          <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-foreground text-[10px] font-semibold text-background">
+      <div className="space-y-3 p-3">
+        {/* Task assignment bubble */}
+        <div className="flex items-start gap-2.5">
+          <div className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-foreground text-[9px] font-bold text-background">
             M
           </div>
-          <div className="min-w-0 flex-1 rounded-xl bg-muted/60 px-3 py-2.5">
-            <div className="mb-1 text-[11px] font-semibold text-muted-foreground">
+          <div className="min-w-0 flex-1 rounded-lg bg-muted/60 px-3 py-2">
+            <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
               Main agent assigned task
-            </div>
-            <p className="text-[13px] leading-relaxed text-foreground">
-              {agent.task}
             </p>
+            <p className="text-[12px] leading-relaxed text-foreground">{agent.task}</p>
           </div>
         </div>
 
-        <div className="flex items-start gap-3">
-          <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-blue-500/15 text-[10px] font-semibold text-blue-700 ring-1 ring-blue-500/25 dark:text-blue-300 dark:ring-blue-400/30">
+        {/* Activity log */}
+        <div className="flex items-start gap-2.5">
+          <div className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-blue-500/15 text-[9px] font-bold text-blue-700 ring-1 ring-blue-500/25 dark:text-blue-300 dark:ring-blue-400/30">
             A
           </div>
           <div className="min-w-0 flex-1">
-            <div className="rounded-xl border border-border bg-card px-3 py-2.5">
-              <div className="mb-1 text-[11px] font-semibold text-muted-foreground">
-                {agent.name}
-              </div>
-              <p className="text-[13px] leading-relaxed text-foreground">
-                I&apos;ll take this slice independently, inspect the relevant files,
-                and report progress back to the main agent.
-              </p>
-            </div>
-
-            <div className="mt-3 space-y-2">
-              {agent.activity.map((entry) => (
-                <div
-                  key={`${entry.time}-${entry.title}`}
-                  className="rounded-lg border border-border bg-muted/30 px-3 py-2"
-                >
-                  <div className="flex items-center gap-2">
-                    <SearchIcon size={13} className="shrink-0 text-muted-foreground" />
-                    <span className="font-mono text-[10px] tabular-nums text-muted-foreground">
-                      {entry.time}
-                    </span>
-                    <span className="truncate text-[12px] font-medium text-foreground">
-                      {entry.title}
-                    </span>
-                  </div>
-                  <p className="mt-1 pl-10 text-[12px] leading-relaxed text-muted-foreground">
-                    {entry.detail}
-                  </p>
+            {/* Scrollable log area */}
+            <div
+              ref={scrollRef}
+              className="max-h-[420px] space-y-1 overflow-y-auto pr-0.5"
+              style={{ scrollbarWidth: "thin" }}
+            >
+              {agent.activity.length === 0 ? (
+                <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-2.5 py-2 text-[11px] text-muted-foreground">
+                  <LoaderCircleIcon size={11} className="animate-spin" />
+                  Starting up…
                 </div>
-              ))}
+              ) : (
+                agent.activity.map((entry, i) => (
+                  <ActivityRow key={`${entry.time}-${entry.title}-${i}`} entry={entry} />
+                ))
+              )}
+
+              {/* Blinking cursor while running */}
+              {isRunning && (
+                <div className="flex items-center gap-2 rounded-lg border border-border/40 bg-muted/10 px-2.5 py-1.5">
+                  <span className="inline-block h-3 w-px animate-[blink_1s_step-end_infinite] bg-foreground/70" />
+                  <span className="text-[10px] text-muted-foreground italic">agent is working…</span>
+                </div>
+              )}
             </div>
 
-            <div className="mt-3 rounded-xl border border-border bg-card px-3 py-2.5">
-              <div className="mb-2 flex flex-wrap gap-1.5">
-                {agent.files.map((file) => (
-                  <span
-                    key={file}
-                    className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
-                  >
-                    {file}
-                  </span>
-                ))}
+            {/* File scope */}
+            {agent.files.length > 0 && (
+              <div className="mt-2 rounded-lg border border-border/60 bg-card px-3 py-2">
+                <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  File scope
+                </p>
+                <div className="flex flex-wrap gap-1">
+                  {agent.files.map((file) => (
+                    <span
+                      key={file}
+                      className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+                    >
+                      {file}
+                    </span>
+                  ))}
+                </div>
               </div>
-              <p className="text-[12px] leading-relaxed text-foreground">
-                {agent.status === "stopped"
-                  ? "Stopped before finishing. The partial activity above is preserved for review."
-                  : finalUpdate}
-              </p>
-            </div>
+            )}
           </div>
         </div>
       </div>
@@ -351,6 +443,10 @@ function ParallelAgentTimeline({
                       </span>
                     </span>
                   </CollapsibleTrigger>
+
+                  {agent.sandboxId && (
+                    <SandboxIdBadge sandboxId={agent.sandboxId} />
+                  )}
 
                   {canStop && (
                     <button

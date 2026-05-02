@@ -7,7 +7,17 @@ import {
   WebPreviewNavigationButton,
   WebPreviewUrl,
 } from "@/components/ai-elements/web-preview";
-import { CheckIcon, FileIcon, TerminalIcon, XIcon } from "lucide-react";
+import {
+  Terminal,
+  TerminalActions,
+  TerminalClearButton,
+  TerminalContent,
+  TerminalCopyButton,
+  TerminalHeader,
+  TerminalStatus,
+  TerminalTitle,
+} from "@/components/ai-elements/terminal";
+import { CheckIcon, ExternalLinkIcon, FileIcon, RefreshCwIcon, TerminalIcon, XIcon } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
 import { CodeEditor } from "./code-editor";
 import { FileExplorer } from "./file-explorer";
@@ -28,8 +38,16 @@ interface CodePanelProps {
   onAddFolder: (parentDir: string, name: string) => boolean;
   onDeletePath: (path: string, kind: "file" | "folder") => void;
   onRenamePath: (path: string, newBaseName: string, kind: "file" | "folder") => boolean;
-  isTerminalVisible: boolean;
-  onToggleTerminal: () => void;
+  previewUrl: string | null;
+  previewError: string | null;
+  isPreviewLoading: boolean;
+  previewStage: string;
+  previewStatusMessage: string;
+  previewFilesProcessed: number;
+  previewFilesTotal: number;
+  previewTerminalBuffer: string;
+  onClearPreviewTerminal: () => void;
+  onRequestPreview: () => void;
 }
 
 export function CodePanel({
@@ -42,13 +60,22 @@ export function CodePanel({
   onAddFolder,
   onDeletePath,
   onRenamePath,
-  isTerminalVisible,
-  onToggleTerminal,
+  previewUrl,
+  previewError,
+  isPreviewLoading,
+  previewStage,
+  previewStatusMessage,
+  previewFilesProcessed,
+  previewFilesTotal,
+  previewTerminalBuffer,
+  onClearPreviewTerminal,
+  onRequestPreview,
 }: CodePanelProps) {
   const currentFile = activeFile ? codeFiles[activeFile] : undefined;
   const stats = activeFile ? DIFF_STATS[activeFile] : undefined;
   const [fileTreeWidth, setFileTreeWidth] = useState(220);
   const [view, setView] = useState<"code" | "preview">("code");
+  const [showTerminal, setShowTerminal] = useState(false);
   const bodyRef = useRef<HTMLDivElement | null>(null);
 
   const handleResizeStart = useCallback(
@@ -77,6 +104,11 @@ export function CodePanel({
     },
     [fileTreeWidth]
   );
+
+  const handleOpenPreview = useCallback(() => {
+    setView("preview");
+    onRequestPreview();
+  }, [onRequestPreview]);
 
   return (
     /*
@@ -114,6 +146,31 @@ export function CodePanel({
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            aria-label={showTerminal ? "Hide terminal" : "Show terminal"}
+            onClick={() => setShowTerminal((v) => !v)}
+            className={[
+              "rounded-md p-1.5 transition-colors",
+              showTerminal
+                ? "bg-muted text-foreground"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
+            ].join(" ")}
+          >
+            <TerminalIcon size={14} />
+          </button>
+          <button
+            type="button"
+            aria-label="Refresh sandbox preview"
+            onClick={onRequestPreview}
+            disabled={isPreviewLoading}
+            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <RefreshCwIcon
+              size={14}
+              className={isPreviewLoading ? "animate-spin" : ""}
+            />
+          </button>
           <div className="flex rounded-md bg-muted p-0.5 text-[12px]">
             <button
               type="button"
@@ -129,7 +186,7 @@ export function CodePanel({
             </button>
             <button
               type="button"
-              onClick={() => setView("preview")}
+              onClick={handleOpenPreview}
               className={[
                 "rounded px-2 py-1 font-medium transition-colors",
                 view === "preview"
@@ -140,35 +197,34 @@ export function CodePanel({
               Preview
             </button>
           </div>
-          <button
-            type="button"
-            aria-pressed={isTerminalVisible}
-            onClick={onToggleTerminal}
-            className={[
-              "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[12px] font-medium ring-1 ring-border transition-colors",
-              isTerminalVisible
-                ? "bg-foreground text-background"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground",
-            ].join(" ")}
-          >
-            <TerminalIcon size={12} />
-            Terminal
-          </button>
         </div>
       </div>
 
-      {/* ── Body (1fr): explicit grid prevents editor/file-tree overlap ── */}
+      {/* ── Body (1fr): flex-column so terminal docks at the bottom ── */}
       <div
         ref={bodyRef}
         style={{
-          display: view === "code" ? "grid" : "block",
-          gridTemplateColumns:
-            view === "code" ? `${fileTreeWidth}px 7px minmax(0, 1fr)` : undefined,
+          display: "flex",
+          flexDirection: "column",
           minWidth: 0,
           minHeight: 0,
           overflow: "hidden",
         }}
       >
+        {/* ── Main content area (code editor OR preview) ── */}
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            overflow: "hidden",
+            ...(view === "code"
+              ? {
+                  display: "grid",
+                  gridTemplateColumns: `${fileTreeWidth}px 7px minmax(0, 1fr)`,
+                }
+              : { display: "block" }),
+          }}
+        >
         {view === "code" ? (
           <>
             {/* ── File tree ───────────────────────────────────── */}
@@ -263,21 +319,105 @@ export function CodePanel({
             style={{
               height: "100%",
               overflow: "hidden",
+              display: "flex",
+              flexDirection: "column",
             }}
           >
-            <WebPreview
-              defaultUrl="https://example.com"
-              className="min-h-0 rounded-none border-0"
-            >
-              <WebPreviewNavigation className="shrink-0 bg-muted/20 px-3 py-2">
-                <WebPreviewNavigationButton tooltip="Refresh preview">
-                  ↻
-                </WebPreviewNavigationButton>
-                <WebPreviewUrl className="h-8 text-[12px]" />
-              </WebPreviewNavigation>
-              <WebPreviewBody className="border-0 bg-background" />
-            </WebPreview>
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <WebPreview
+                key={previewUrl ?? "preview-empty"}
+                defaultUrl={previewUrl ?? ""}
+                className="min-h-0 rounded-none border-0"
+              >
+                <WebPreviewNavigation className="shrink-0 bg-muted/20 px-3 py-2">
+                  <WebPreviewNavigationButton
+                    tooltip="Refresh preview"
+                    onClick={onRequestPreview}
+                    disabled={isPreviewLoading}
+                  >
+                    ↻
+                  </WebPreviewNavigationButton>
+                  <WebPreviewUrl className="h-8 text-[12px]" />
+                  {previewUrl && (
+                    <WebPreviewNavigationButton
+                      tooltip="Open in new tab"
+                      onClick={() => window.open(previewUrl, "_blank", "noopener,noreferrer")}
+                    >
+                      <ExternalLinkIcon size={12} />
+                    </WebPreviewNavigationButton>
+                  )}
+                </WebPreviewNavigation>
+
+                {/* Always keep the iframe mounted when we have a URL so the
+                    preview stays visible during refreshes and after errors. */}
+                <div
+                  className="relative min-h-0 flex-1 overflow-hidden"
+                  style={{ display: "flex", flexDirection: "column" }}
+                >
+                  {previewUrl ? (
+                    <WebPreviewBody className="border-0 bg-background" />
+                  ) : null}
+
+                  {/* Loading overlay — semi-transparent so user sees prior content */}
+                  {isPreviewLoading ? (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-background/80 px-6 text-center text-[13px] text-muted-foreground backdrop-blur-sm">
+                      <p>{previewStatusMessage || "Starting E2B sandbox preview..."}</p>
+                      <p className="font-mono text-[11px]">
+                        Stage: {previewStage}
+                        {previewFilesTotal > 0
+                          ? ` · Files ${previewFilesProcessed}/${previewFilesTotal}`
+                          : ""}
+                      </p>
+                    </div>
+                  ) : previewError ? (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/90 px-6 text-center backdrop-blur-sm">
+                      <p className="text-[13px] text-destructive">{previewError}</p>
+                      {previewUrl && (
+                        <a
+                          href={previewUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[12px] text-primary underline underline-offset-2"
+                        >
+                          Open sandbox URL in new tab
+                        </a>
+                      )}
+                    </div>
+                  ) : !previewUrl ? (
+                    <div className="absolute inset-0 flex items-center justify-center px-6 text-center text-[13px] text-muted-foreground">
+                      Open Preview to run this project in E2B.
+                    </div>
+                  ) : null}
+                </div>
+              </WebPreview>
+            </div>
           </div>
+        )}
+        </div>
+
+        {/* ── Terminal panel — shown in both views when toggle is on ── */}
+        {showTerminal && (
+          <Terminal
+            output={previewTerminalBuffer}
+            isStreaming={isPreviewLoading}
+            onClear={onClearPreviewTerminal}
+            className="shrink-0 rounded-none border-x-0 border-b-0"
+            style={{ height: 200 }}
+          >
+            <TerminalHeader className="px-3 py-2">
+              <TerminalTitle className="text-[12px]">E2B sandbox terminal</TerminalTitle>
+              <div className="flex items-center gap-1">
+                <TerminalStatus className="text-[11px]">
+                  {previewStage}
+                </TerminalStatus>
+                <TerminalActions>
+                  <TerminalCopyButton />
+                  <TerminalClearButton />
+                </TerminalActions>
+              </div>
+            </TerminalHeader>
+            <TerminalContent className="max-h-none min-h-0 flex-1 overflow-auto p-3 text-[12px]" />
+          </Terminal>
         )}
       </div>
     </div>

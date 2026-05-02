@@ -69,4 +69,65 @@ export default defineSchema({
     .index("by_thread_and_user", ["threadId", "userId"])
     .index("by_message_and_user", ["messageId", "userId"])
     .index("by_message", ["messageId"]),
+
+  // ── Swarm orchestration runs ──────────────────────────────────────────
+  swarmRuns: defineTable({
+    threadId: v.id("threads"),
+    projectId: v.optional(v.id("projects")),
+    status: v.union(
+      v.literal("running"),
+      v.literal("merging"),
+      v.literal("done"),
+      v.literal("error")
+    ),
+    plan: v.string(),
+    totalTokens: v.number(),
+    startedAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_thread", ["threadId"]),
+
+  // ── Individual spawned agents within a swarm run ─────────────────────
+  spawnedAgents: defineTable({
+    swarmRunId: v.id("swarmRuns"),
+    name: v.string(),
+    task: v.string(),
+    assignedFiles: v.array(v.string()),
+    /** "opencode" uses OpenCode+Gemini 2.5 Flash; "claude" uses Claude Code */
+    agentTemplate: v.union(v.literal("opencode"), v.literal("claude")),
+    status: v.union(
+      v.literal("queued"),
+      v.literal("running"),
+      v.literal("done"),
+      v.literal("error")
+    ),
+    progress: v.number(),
+    tokensUsed: v.number(),
+    startedAt: v.optional(v.number()),
+    completedAt: v.optional(v.number()),
+    result: v.optional(v.string()),
+    /** E2B sandbox ID — stored so we can pause/resume/kill it */
+    sandboxId: v.optional(v.string()),
+      activity: v.array(
+        v.object({
+          time: v.string(),
+          title: v.string(),
+          detail: v.string(),
+          /** Categorises the event so the UI can show the right icon */
+          kind: v.optional(
+            v.union(
+              v.literal("system"),
+              v.literal("thinking"),
+              v.literal("tool"),
+              v.literal("file"),
+              v.literal("command"),
+              v.literal("text"),
+              v.literal("result"),
+              v.literal("error")
+            )
+          ),
+        })
+      ),
+    error: v.optional(v.string()),
+    updatedAt: v.number(),
+  }).index("by_swarm_run", ["swarmRunId"]),
 });
