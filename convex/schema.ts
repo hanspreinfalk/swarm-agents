@@ -18,18 +18,26 @@ export default defineSchema({
     userId: v.string(), // tokenIdentifier from Clerk auth
     title: v.string(),
     model: v.string(),
-    repositoryFullName: v.optional(v.string()),
-    branch: v.optional(v.string()),
+    projectId: v.optional(v.id("projects")),
     updatedAt: v.number(),
   })
     .index("by_user", ["userId"])
     .index("by_user_and_updated", ["userId", "updatedAt"]),
 
-  // ── Synced repository files per thread/branch ──────────────────────────
-  repositoryFiles: defineTable({
-    threadId: v.id("threads"),
+  // ── Projects (shared across threads) ────────────────────────────────────
+  projects: defineTable({
+    userId: v.string(),
+    name: v.string(),
     repositoryFullName: v.string(),
     branch: v.string(),
+    updatedAt: v.number(),
+  })
+    .index("by_user_and_updated", ["userId", "updatedAt"])
+    .index("by_user_and_repo_and_branch", ["userId", "repositoryFullName", "branch"]),
+
+  // ── Synced repository files per project ─────────────────────────────────
+  projectFiles: defineTable({
+    projectId: v.id("projects"),
     path: v.string(),
     content: v.string(),
     language: v.union(
@@ -41,9 +49,8 @@ export default defineSchema({
     size: v.optional(v.number()),
     updatedAt: v.number(),
   })
-    .index("by_thread", ["threadId"])
-    .index("by_thread_and_branch", ["threadId", "branch"])
-    .index("by_thread_and_branch_and_path", ["threadId", "branch", "path"]),
+    .index("by_project", ["projectId"])
+    .index("by_project_and_path", ["projectId", "path"]),
 
   // ── Messages ───────────────────────────────────────────────────────────
   messages: defineTable({

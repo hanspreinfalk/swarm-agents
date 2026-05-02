@@ -54,6 +54,7 @@ import { ChatPanel } from "./chat-panel";
 import { CommitDialog } from "./commit-dialog";
 import { CodePanel } from "./code-panel";
 import { NewThreadDialog } from "./new-thread-dialog";
+import type { ExistingProject } from "./new-thread-dialog";
 import { CODE_FILES } from "./data";
 import type { AssistantMessage, ChatMessage, CodeFile, UserMessage } from "./types";
 import {
@@ -195,8 +196,9 @@ export function CodexApp() {
   const updateThreadMutation = useMutation(api.threads.updateThread);
   const deleteThreadMutation = useMutation(api.threads.deleteThread);
   const deleteAssistantMessageMutation = useMutation(api.threads.deleteAssistantMessage);
-  const replaceRepositoryFilesMutation = useMutation(api.threads.replaceRepositoryFiles);
-  const saveRepositoryFileMutation = useMutation(api.threads.saveRepositoryFile);
+  const upsertProjectMutation = useMutation(api.threads.upsertProject);
+  const replaceProjectFilesMutation = useMutation(api.threads.replaceProjectFiles);
+  const saveProjectFileMutation = useMutation(api.threads.saveProjectFile);
   const setMessageSentimentMutation = useMutation(api.likedMessages.setSentiment);
 
   const likedMessagesQuery = useQuery(
@@ -239,6 +241,7 @@ export function CodexApp() {
   const [emptyFolders, setEmptyFolders] = useState<Set<string>>(() => new Set());
   const [repositories, setRepositories] = useState<GithubRepository[]>([]);
   const [githubUser, setGithubUser] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null);
   const [branches, setBranches] = useState<GithubBranch[]>([]);
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
@@ -249,6 +252,9 @@ export function CodexApp() {
   const [isCommitting, setIsCommitting] = useState(false);
   const [newThreadDialogOpen, setNewThreadDialogOpen] = useState(false);
   const saveTimersRef = useRef<Record<string, number>>({});
+  const projectsQuery = useQuery(api.threads.listProjects);
+  const projects = (projectsQuery ?? []) as ExistingProject[];
+  const isLoadingProjects = projectsQuery === undefined;
 
   const handleCodeFileChange = useCallback(
     (path: string, content: string) => {
@@ -260,13 +266,11 @@ export function CodexApp() {
         return { ...prev, [path]: nextFile };
       });
 
-      if (!activeThreadId || !selectedRepo || !selectedBranch || !nextFile) return;
+      if (!selectedProjectId || !nextFile) return;
       window.clearTimeout(saveTimersRef.current[path]);
       saveTimersRef.current[path] = window.setTimeout(() => {
-        saveRepositoryFileMutation({
-          threadId: activeThreadId as Id<"threads">,
-          repositoryFullName: selectedRepo,
-          branch: selectedBranch,
+        saveProjectFileMutation({
+          projectId: selectedProjectId as Id<"projects">,
           file: {
             path,
             content,
@@ -274,11 +278,11 @@ export function CodexApp() {
             size: new TextEncoder().encode(content).byteLength,
           },
         }).catch(() => {
-          toast.error(`Could not save ${path} to the thread.`);
+          toast.error(`Could not save ${path} to the project.`);
         });
       }, 450);
     },
-    [activeThreadId, saveRepositoryFileMutation, selectedBranch, selectedRepo]
+    [saveProjectFileMutation, selectedProjectId]
   );
 
   const handleAddFile = useCallback(
@@ -482,11 +486,10 @@ export function CodexApp() {
   const rightPanelRef = useRef<HTMLDivElement | null>(null);
 
   const repositoryFilesQuery = useQuery(
-    api.threads.listRepositoryFiles,
-    activeThreadId && selectedBranch
+    api.threads.listProjectFiles,
+    selectedProjectId
       ? {
-          threadId: activeThreadId as Id<"threads">,
-          branch: selectedBranch,
+          projectId: selectedProjectId as Id<"projects">,
         }
       : "skip"
   );
@@ -540,7 +543,7 @@ export function CodexApp() {
           const currentStillExists = current && nextBranches.some((branch) => branch.name === current);
           if (currentStillExists) return current;
           const repo = repositories.find((repository) => repository.fullName === selectedRepo);
-          return activeThread?.branch ?? repo?.defaultBranch ?? nextBranches[0]?.name ?? null;
+          return repo?.defaultBranch ?? nextBranches[0]?.name ?? null;
         });
       })
       .catch((error) => {
@@ -554,23 +557,20 @@ export function CodexApp() {
     return () => {
       cancelled = true;
     };
-  }, [activeThread?.branch, repositories, selectedRepo]);
+  }, [repositories, selectedRepo]);
 
   useEffect(() => {
     if (!activeThread) return;
-    const repositoryFullName = activeThread.repositoryFullName ?? repositories[0]?.fullName ?? null;
+    const activeProject = projects.find((project) => project._id === activeThread.projectId);
     queueMicrotask(() => {
-      setSelectedRepo(repositoryFullName);
-      setSelectedBranch(
-        activeThread.branch ??
-          repositories.find((repo) => repo.fullName === repositoryFullName)?.defaultBranch ??
-          null
-      );
+      setSelectedProjectId(activeProject?._id ?? null);
+      setSelectedRepo(activeProject?.repositoryFullName ?? null);
+      setSelectedBranch(activeProject?.branch ?? null);
     });
-  }, [activeThread, repositories]);
+  }, [activeThread, projects]);
 
   useEffect(() => {
-    if (!activeThreadId || !selectedBranch || repositoryFilesQuery === undefined) return;
+    if (!selectedProjectId || repositoryFilesQuery === undefined) return;
     const nextFiles: Record<string, CodeFile> = {};
     for (const file of repositoryFiles) {
       nextFiles[file.path] = {
@@ -583,7 +583,7 @@ export function CodexApp() {
       setEmptyFolders(new Set());
       setActiveFile(Object.keys(nextFiles).sort()[0] ?? "");
     });
-  }, [activeThreadId, repositoryFiles, repositoryFilesQuery, selectedBranch]);
+  }, [activeThreadId, repositoryFiles, repositoryFilesQuery, selectedProjectId]);
 
   useEffect(() => {
     const timers = saveTimersRef.current;
@@ -597,8 +597,8 @@ export function CodexApp() {
   const activeTerminal =
     terminals.find((terminal) => terminal.id === activeTerminalId) ?? terminals[0];
 
-  const syncRepositoryForThread = useCallback(
-    async (threadId: string, repositoryFullName: string, branch: string) => {
+  const syncRepositoryForProject = useCallback(
+    async (projectId: string, repositoryFullName: string, branch: string) => {
       const result = await postGithub<{
         files: GithubFilePayload[];
         truncated: boolean;
@@ -608,10 +608,8 @@ export function CodexApp() {
         branch,
       });
 
-      await replaceRepositoryFilesMutation({
-        threadId: threadId as Id<"threads">,
-        repositoryFullName,
-        branch,
+      await replaceProjectFilesMutation({
+        projectId: projectId as Id<"projects">,
         files: result.files,
       });
 
@@ -627,32 +625,27 @@ export function CodexApp() {
       setActiveFile(Object.keys(nextFiles).sort()[0] ?? "");
 
       if (result.truncated) {
-        toast.warning("Synced the first text files from a large repository.");
+        toast.warning("GitHub returned a truncated tree. Some files may be missing.");
       } else {
         toast.success(`Synced ${result.files.length} files from GitHub.`);
       }
     },
-    [replaceRepositoryFilesMutation]
+    [replaceProjectFilesMutation]
   );
 
   const ensureActiveThread = useCallback(
     async (title = "New thread") => {
-      if (!selectedRepo || !selectedBranch) {
-        toast.error("Choose a GitHub repository first.");
-        return null;
-      }
       if (activeThreadId) return activeThreadId;
 
       const threadId = await createThreadMutation({
         title,
         model: selectedModel,
-        repositoryFullName: selectedRepo,
-        branch: selectedBranch,
+        ...(selectedProjectId ? { projectId: selectedProjectId as Id<"projects"> } : {}),
       });
       setActiveThreadId(threadId);
       return threadId;
     },
-    [activeThreadId, createThreadMutation, selectedBranch, selectedModel, selectedRepo]
+    [activeThreadId, createThreadMutation, selectedModel, selectedProjectId]
   );
 
   const handleNewBranchDialogOpenChange = useCallback((open: boolean) => {
@@ -686,11 +679,17 @@ export function CodexApp() {
       });
       setBranches((prev) => [...prev, branch]);
       setSelectedBranch(name);
-      await updateThreadMutation({
-        threadId: threadId as Id<"threads">,
+      const projectId = await upsertProjectMutation({
+        name: selectedRepo.split("/")[1] ?? selectedRepo,
         repositoryFullName: selectedRepo,
         branch: name,
       });
+      setSelectedProjectId(projectId);
+      await updateThreadMutation({
+        threadId: threadId as Id<"threads">,
+        projectId: projectId as Id<"projects">,
+      });
+      await syncRepositoryForProject(projectId, selectedRepo, name);
       setNewBranchDialogOpen(false);
       setNewBranchNameDraft("");
       toast.success(`Created and checked out ${name}`);
@@ -703,28 +702,10 @@ export function CodexApp() {
     newBranchNameDraft,
     selectedBranch,
     selectedRepo,
+    syncRepositoryForProject,
     updateThreadMutation,
+    upsertProjectMutation,
   ]);
-
-  const handleSelectRepository = useCallback(
-    async (repositoryFullName: string) => {
-      const repo = repositories.find((item) => item.fullName === repositoryFullName);
-      const nextBranch = repo?.defaultBranch ?? null;
-      setSelectedRepo(repositoryFullName);
-      setSelectedBranch(nextBranch);
-      setCodeFiles({});
-      setActiveFile("");
-
-      if (activeThreadId) {
-        await updateThreadMutation({
-          threadId: activeThreadId as Id<"threads">,
-          repositoryFullName,
-          ...(nextBranch ? { branch: nextBranch } : {}),
-        });
-      }
-    },
-    [activeThreadId, repositories, updateThreadMutation]
-  );
 
   const handleSelectBranch = useCallback(
     async (branch: string) => {
@@ -732,22 +713,33 @@ export function CodexApp() {
       const threadId = await ensureActiveThread();
       if (!threadId) return;
 
-      setSelectedBranch(branch);
       setIsSyncing(true);
       try {
-        await updateThreadMutation({
-          threadId: threadId as Id<"threads">,
+        const projectId = await upsertProjectMutation({
+          name: selectedRepo.split("/")[1] ?? selectedRepo,
           repositoryFullName: selectedRepo,
           branch,
         });
-        await syncRepositoryForThread(threadId, selectedRepo, branch);
+        setSelectedProjectId(projectId);
+        setSelectedBranch(branch);
+        await updateThreadMutation({
+          threadId: threadId as Id<"threads">,
+          projectId: projectId as Id<"projects">,
+        });
+        await syncRepositoryForProject(projectId, selectedRepo, branch);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "Could not switch branches.");
       } finally {
         setIsSyncing(false);
       }
     },
-    [ensureActiveThread, selectedRepo, syncRepositoryForThread, updateThreadMutation]
+    [
+      ensureActiveThread,
+      selectedRepo,
+      syncRepositoryForProject,
+      updateThreadMutation,
+      upsertProjectMutation,
+    ]
   );
 
   const handleSyncRepository = useCallback(async () => {
@@ -760,13 +752,35 @@ export function CodexApp() {
 
     setIsSyncing(true);
     try {
-      await syncRepositoryForThread(threadId, selectedRepo, selectedBranch);
+      const projectId =
+        selectedProjectId ??
+        (await upsertProjectMutation({
+          name: selectedRepo.split("/")[1] ?? selectedRepo,
+          repositoryFullName: selectedRepo,
+          branch: selectedBranch,
+        }));
+      if (!selectedProjectId) {
+        setSelectedProjectId(projectId);
+        await updateThreadMutation({
+          threadId: threadId as Id<"threads">,
+          projectId: projectId as Id<"projects">,
+        });
+      }
+      await syncRepositoryForProject(projectId, selectedRepo, selectedBranch);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not sync repository.");
     } finally {
       setIsSyncing(false);
     }
-  }, [ensureActiveThread, selectedBranch, selectedRepo, syncRepositoryForThread]);
+  }, [
+    ensureActiveThread,
+    selectedBranch,
+    selectedProjectId,
+    selectedRepo,
+    syncRepositoryForProject,
+    updateThreadMutation,
+    upsertProjectMutation,
+  ]);
 
   const handleOpenRepository = useCallback(() => {
     if (!selectedRepo) {
@@ -804,11 +818,21 @@ export function CodexApp() {
           message: message.trim(),
           files,
         });
-        await replaceRepositoryFilesMutation({
-          threadId: threadId as Id<"threads">,
-          repositoryFullName: selectedRepo,
-          branch: selectedBranch,
+        const projectId =
+          selectedProjectId ??
+          (await upsertProjectMutation({
+            name: selectedRepo.split("/")[1] ?? selectedRepo,
+            repositoryFullName: selectedRepo,
+            branch: selectedBranch,
+          }));
+        if (!selectedProjectId) setSelectedProjectId(projectId);
+        await replaceProjectFilesMutation({
+          projectId: projectId as Id<"projects">,
           files,
+        });
+        await updateThreadMutation({
+          threadId: threadId as Id<"threads">,
+          projectId: projectId as Id<"projects">,
         });
         setCommitDialogOpen(false);
         toast.success(`Committed ${result.sha.slice(0, 7)} to ${selectedBranch}.`);
@@ -821,9 +845,12 @@ export function CodexApp() {
     [
       codeFiles,
       ensureActiveThread,
-      replaceRepositoryFilesMutation,
+      replaceProjectFilesMutation,
+      selectedProjectId,
       selectedBranch,
       selectedRepo,
+      upsertProjectMutation,
+      updateThreadMutation,
     ]
   );
 
@@ -884,20 +911,47 @@ export function CodexApp() {
 
   const handleCreateThreadWithRepo = useCallback(
     async (repoFullName: string, branch: string) => {
-      const threadId = await createThreadMutation({
-        title: "New thread",
-        model: selectedModel,
+      const projectId = await upsertProjectMutation({
+        name: repoFullName.split("/")[1] ?? repoFullName,
         repositoryFullName: repoFullName,
         branch,
       });
+      await syncRepositoryForProject(projectId, repoFullName, branch);
+      const threadId = await createThreadMutation({
+        title: "New thread",
+        model: selectedModel,
+        projectId: projectId as Id<"projects">,
+      });
       setActiveThreadId(threadId);
+      setSelectedProjectId(projectId);
       setSelectedRepo(repoFullName);
       setSelectedBranch(branch);
       setStreamingContent("");
       setCodeFiles({});
       setActiveFile("");
     },
-    [createThreadMutation, selectedModel]
+    [createThreadMutation, selectedModel, syncRepositoryForProject, upsertProjectMutation]
+  );
+
+  const handleCreateThreadWithProject = useCallback(
+    async (projectId: string) => {
+      const project = projects.find((item) => item._id === projectId);
+      if (!project) {
+        toast.error("Project not found.");
+        return;
+      }
+      const threadId = await createThreadMutation({
+        title: project.name,
+        model: selectedModel,
+        projectId: projectId as Id<"projects">,
+      });
+      setActiveThreadId(threadId);
+      setSelectedProjectId(projectId);
+      setSelectedRepo(project.repositoryFullName);
+      setSelectedBranch(project.branch);
+      setStreamingContent("");
+    },
+    [createThreadMutation, projects, selectedModel]
   );
 
   const handleCreateThreadWithNewRepo = useCallback(
@@ -909,13 +963,18 @@ export function CodexApp() {
         isPrivate,
       });
       setRepositories((prev) => [newRepo, ...prev]);
-      const threadId = await createThreadMutation({
-        title: repoName,
-        model: selectedModel,
+      const projectId = await upsertProjectMutation({
+        name: repoName,
         repositoryFullName: newRepo.fullName,
         branch: newRepo.defaultBranch,
       });
+      const threadId = await createThreadMutation({
+        title: repoName,
+        model: selectedModel,
+        projectId: projectId as Id<"projects">,
+      });
       setActiveThreadId(threadId);
+      setSelectedProjectId(projectId);
       setSelectedRepo(newRepo.fullName);
       setSelectedBranch(newRepo.defaultBranch);
       setStreamingContent("");
@@ -923,7 +982,7 @@ export function CodexApp() {
       setActiveFile("");
       toast.success(`Created repository ${newRepo.fullName}`);
     },
-    [createThreadMutation, selectedModel]
+    [createThreadMutation, selectedModel, upsertProjectMutation]
   );
 
   const handleSelectThread = useCallback((id: string) => {
@@ -1027,8 +1086,7 @@ export function CodexApp() {
         threadId = await createThreadMutation({
           title: text.slice(0, 60),
           model: selectedModel,
-          ...(selectedRepo ? { repositoryFullName: selectedRepo } : {}),
-          ...(selectedBranch ? { branch: selectedBranch } : {}),
+          ...(selectedProjectId ? { projectId: selectedProjectId as Id<"projects"> } : {}),
         });
         setActiveThreadId(threadId);
       } else if (dbMessages.length === 0) {
@@ -1037,8 +1095,7 @@ export function CodexApp() {
           threadId: threadId as Id<"threads">,
           title: text.slice(0, 60),
           model: selectedModel,
-          ...(selectedRepo ? { repositoryFullName: selectedRepo } : {}),
-          ...(selectedBranch ? { branch: selectedBranch } : {}),
+          ...(selectedProjectId ? { projectId: selectedProjectId as Id<"projects"> } : {}),
         });
       }
 
@@ -1060,8 +1117,7 @@ export function CodexApp() {
       activeThreadId,
       dbMessages,
       selectedModel,
-      selectedRepo,
-      selectedBranch,
+      selectedProjectId,
       createThreadMutation,
       addMessageMutation,
       updateThreadMutation,
@@ -1577,11 +1633,14 @@ export function CodexApp() {
         open={newThreadDialogOpen}
         onOpenChange={setNewThreadDialogOpen}
         repos={repositories}
+        projects={projects}
         isLoadingRepos={isLoadingRepos}
+        isLoadingProjects={isLoadingProjects}
         repoError={repoError}
         githubUser={githubUser}
         onRefreshRepos={loadRepos}
         onCreateWithExisting={handleCreateThreadWithRepo}
+        onCreateWithProject={handleCreateThreadWithProject}
         onCreateWithNew={handleCreateThreadWithNewRepo}
       />
 

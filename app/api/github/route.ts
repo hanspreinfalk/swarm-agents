@@ -63,8 +63,10 @@ type GithubFile = {
   size?: number;
 };
 
-const MAX_SYNCED_FILES = 300;
 const MAX_FILE_SIZE_BYTES = 200_000;
+const BLOB_SYNC_CONCURRENCY = 4;
+const MAX_GITHUB_RETRIES = 5;
+const RETRY_BASE_DELAY_MS = 1_000;
 
 const TEXT_EXTENSIONS = new Set([
   ".cjs",
@@ -112,42 +114,90 @@ function parseRepo(fullName: string) {
 
 async function githubRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = await getGithubToken();
-  const response = await fetch(`https://api.github.com${path}`, {
-    ...init,
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      ...init.headers,
-    },
-  });
+  for (let attempt = 0; attempt < MAX_GITHUB_RETRIES; attempt++) {
+    const response = await fetch(`https://api.github.com${path}`, {
+      ...init,
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        ...init.headers,
+      },
+    });
 
-  if (response.status === 204) {
-    return undefined as T;
+    if (response.status === 204) {
+      return undefined as T;
+    }
+
+    const data = await response.json() as unknown;
+    const message = (data as { message?: string })?.message ?? response.statusText;
+    const lowerMessage = message.toLowerCase();
+    const isRateLimited =
+      response.status === 429 ||
+      (response.status === 403 &&
+        (response.headers.get("x-ratelimit-remaining") === "0" ||
+          lowerMessage.includes("rate limit") ||
+          lowerMessage.includes("secondary rate limit")));
+
+    if (!response.ok) {
+      if (isRateLimited && attempt < MAX_GITHUB_RETRIES - 1) {
+        const retryAfterMs = Number(response.headers.get("retry-after"));
+        const resetAtSeconds = Number(response.headers.get("x-ratelimit-reset"));
+        const resetDelayMs =
+          Number.isFinite(resetAtSeconds) && resetAtSeconds > 0
+            ? Math.max(0, resetAtSeconds * 1_000 - Date.now())
+            : 0;
+        const headerDelayMs =
+          Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs * 1_000 : 0;
+        const backoffDelayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+        const delayMs = Math.max(backoffDelayMs, headerDelayMs, resetDelayMs, RETRY_BASE_DELAY_MS);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      throw new Error(`GitHub API error (${response.status}): ${message}`);
+    }
+
+    // Guard: if GitHub returns an error object with status 200 (rare edge case)
+    if (
+      data !== null &&
+      typeof data === "object" &&
+      !Array.isArray(data) &&
+      typeof (data as { message?: string }).message === "string"
+    ) {
+      const errMsg = (data as { message: string }).message;
+      if (
+        errMsg.toLowerCase().includes("bad credentials") ||
+        errMsg.toLowerCase().includes("requires authentication")
+      ) {
+        throw new Error(`GitHub authentication error: ${errMsg}`);
+      }
+    }
+
+    return data as T;
   }
 
-  const data = await response.json() as unknown;
+  throw new Error("GitHub API request failed after retries.");
+}
 
-  if (!response.ok) {
-    const msg = (data as { message?: string })?.message ?? response.statusText;
-    throw new Error(`GitHub API error (${response.status}): ${msg}`);
-  }
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
 
-  // Guard: if GitHub returns an error object with status 200 (rare edge case)
-  if (
-    data !== null &&
-    typeof data === "object" &&
-    !Array.isArray(data) &&
-    typeof (data as { message?: string }).message === "string"
-  ) {
-    const errMsg = (data as { message: string }).message;
-    if (errMsg.toLowerCase().includes("bad credentials") || errMsg.toLowerCase().includes("requires authentication")) {
-      throw new Error(`GitHub authentication error: ${errMsg}`);
+  async function worker() {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex++;
+      results[currentIndex] = await mapper(items[currentIndex]);
     }
   }
 
-  return data as T;
+  const workerCount = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
 }
 
 function extensionForPath(path: string) {
@@ -266,11 +316,12 @@ async function syncRepository(repositoryFullName: string, branch: string) {
   );
 
   const fileEntries = tree.tree
-    .filter((entry) => entry.type === "blob" && shouldSyncFile(entry.path, entry.size))
-    .slice(0, MAX_SYNCED_FILES);
+    .filter((entry) => entry.type === "blob" && shouldSyncFile(entry.path, entry.size));
 
-  const files = await Promise.all(
-    fileEntries.map(async (entry): Promise<GithubFile | null> => {
+  const files = await mapWithConcurrency(
+    fileEntries,
+    BLOB_SYNC_CONCURRENCY,
+    async (entry): Promise<GithubFile | null> => {
       const blob = await githubRequest<GithubBlobResponse>(
         `/repos/${owner}/${repo}/git/blobs/${entry.sha}`
       );
@@ -282,13 +333,13 @@ async function syncRepository(repositoryFullName: string, branch: string) {
         sha: blob.sha,
         size: blob.size,
       };
-    })
+    }
   );
 
   return {
     branch,
     commitSha: branchInfo.commit.sha,
-    truncated: tree.truncated || tree.tree.length > fileEntries.length,
+    truncated: tree.truncated,
     files: files.filter((file): file is GithubFile => file !== null),
   };
 }

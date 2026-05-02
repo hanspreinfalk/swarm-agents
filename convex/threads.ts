@@ -8,14 +8,6 @@ export async function deleteThreadCascade(
   ctx: MutationCtx,
   threadId: Id<"threads">,
 ) {
-  const repositoryFiles = await ctx.db
-    .query("repositoryFiles")
-    .withIndex("by_thread", (q) => q.eq("threadId", threadId))
-    .take(500);
-  for (const file of repositoryFiles) {
-    await ctx.db.delete(file._id);
-  }
-
   const messages = await ctx.db
     .query("messages")
     .withIndex("by_thread", (q) => q.eq("threadId", threadId))
@@ -39,8 +31,7 @@ export const createThread = mutation({
   args: {
     title: v.optional(v.string()),
     model: v.optional(v.string()),
-    repositoryFullName: v.optional(v.string()),
-    branch: v.optional(v.string()),
+    projectId: v.optional(v.id("projects")),
   },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -50,10 +41,7 @@ export const createThread = mutation({
       userId: identity.tokenIdentifier,
       title: args.title ?? "New thread",
       model: args.model ?? "gpt-4.1",
-      ...(args.repositoryFullName !== undefined
-        ? { repositoryFullName: args.repositoryFullName }
-        : {}),
-      ...(args.branch !== undefined ? { branch: args.branch } : {}),
+      ...(args.projectId !== undefined ? { projectId: args.projectId } : {}),
       updatedAt: Date.now(),
     });
   },
@@ -87,8 +75,7 @@ export const updateThread = mutation({
     threadId: v.id("threads"),
     title: v.optional(v.string()),
     model: v.optional(v.string()),
-    repositoryFullName: v.optional(v.string()),
-    branch: v.optional(v.string()),
+    projectId: v.optional(v.id("projects")),
   },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -99,18 +86,17 @@ export const updateThread = mutation({
       throw new Error("Unauthorized");
     }
 
-    const { threadId, title, model, repositoryFullName, branch } = args;
+    const { threadId, title, model, projectId } = args;
     await ctx.db.patch(threadId, {
       ...(title !== undefined ? { title } : {}),
       ...(model !== undefined ? { model } : {}),
-      ...(repositoryFullName !== undefined ? { repositoryFullName } : {}),
-      ...(branch !== undefined ? { branch } : {}),
+      ...(projectId !== undefined ? { projectId } : {}),
       updatedAt: Date.now(),
     });
   },
 });
 
-const repositoryFileValidator = v.object({
+const projectFileValidator = v.object({
   path: v.string(),
   content: v.string(),
   language: v.union(
@@ -122,56 +108,107 @@ const repositoryFileValidator = v.object({
   size: v.optional(v.number()),
 });
 
-async function requireOwnedThread(ctx: MutationCtx, threadId: Id<"threads">) {
+async function requireOwnedProject(
+  ctx: MutationCtx,
+  projectId: Id<"projects">
+) {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) throw new Error("Not authenticated");
 
-  const thread = await ctx.db.get(threadId);
-  if (!thread || thread.userId !== identity.tokenIdentifier) {
+  const project = await ctx.db.get(projectId);
+  if (!project || project.userId !== identity.tokenIdentifier) {
     throw new Error("Unauthorized");
   }
-  return thread;
+  return project;
 }
 
-export const listRepositoryFiles = query({
+export const listProjects = query({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return [];
+
+    return await ctx.db
+      .query("projects")
+      .withIndex("by_user_and_updated", (q) =>
+        q.eq("userId", identity.tokenIdentifier)
+      )
+      .order("desc")
+      .take(100);
+  },
+});
+
+export const upsertProject = mutation({
   args: {
-    threadId: v.id("threads"),
+    name: v.string(),
+    repositoryFullName: v.string(),
     branch: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error("Not authenticated");
+
+    const existingProject = await ctx.db
+      .query("projects")
+      .withIndex("by_user_and_repo_and_branch", (q) =>
+        q
+          .eq("userId", identity.tokenIdentifier)
+          .eq("repositoryFullName", args.repositoryFullName)
+          .eq("branch", args.branch)
+      )
+      .unique();
+
+    const updatedAt = Date.now();
+    if (existingProject) {
+      await ctx.db.patch(existingProject._id, {
+        name: args.name,
+        updatedAt,
+      });
+      return existingProject._id;
+    }
+
+    return await ctx.db.insert("projects", {
+      userId: identity.tokenIdentifier,
+      name: args.name,
+      repositoryFullName: args.repositoryFullName,
+      branch: args.branch,
+      updatedAt,
+    });
+  },
+});
+
+export const listProjectFiles = query({
+  args: {
+    projectId: v.id("projects"),
   },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) return [];
 
-    const thread = await ctx.db.get(args.threadId);
-    if (!thread || thread.userId !== identity.tokenIdentifier) {
+    const project = await ctx.db.get(args.projectId);
+    if (!project || project.userId !== identity.tokenIdentifier) {
       return [];
     }
 
     return await ctx.db
-      .query("repositoryFiles")
-      .withIndex("by_thread_and_branch", (q) =>
-        q.eq("threadId", args.threadId).eq("branch", args.branch)
-      )
-      .take(500);
+      .query("projectFiles")
+      .withIndex("by_project", (q) => q.eq("projectId", args.projectId))
+      .take(1000);
   },
 });
 
-export const replaceRepositoryFiles = mutation({
+export const replaceProjectFiles = mutation({
   args: {
-    threadId: v.id("threads"),
-    repositoryFullName: v.string(),
-    branch: v.string(),
-    files: v.array(repositoryFileValidator),
+    projectId: v.id("projects"),
+    files: v.array(projectFileValidator),
   },
   handler: async (ctx, args) => {
-    await requireOwnedThread(ctx, args.threadId);
+    const project = await requireOwnedProject(ctx, args.projectId);
 
     const existingFiles = await ctx.db
-      .query("repositoryFiles")
-      .withIndex("by_thread_and_branch", (q) =>
-        q.eq("threadId", args.threadId).eq("branch", args.branch)
-      )
-      .take(500);
+      .query("projectFiles")
+      .withIndex("by_project", (q) => q.eq("projectId", args.projectId))
+      .take(1000);
 
     for (const file of existingFiles) {
       await ctx.db.delete(file._id);
@@ -179,10 +216,8 @@ export const replaceRepositoryFiles = mutation({
 
     const updatedAt = Date.now();
     for (const file of args.files) {
-      await ctx.db.insert("repositoryFiles", {
-        threadId: args.threadId,
-        repositoryFullName: args.repositoryFullName,
-        branch: args.branch,
+      await ctx.db.insert("projectFiles", {
+        projectId: args.projectId,
         path: file.path,
         content: file.content,
         language: file.language,
@@ -192,39 +227,30 @@ export const replaceRepositoryFiles = mutation({
       });
     }
 
-    await ctx.db.patch(args.threadId, {
-      repositoryFullName: args.repositoryFullName,
-      branch: args.branch,
+    await ctx.db.patch(project._id, {
       updatedAt,
     });
   },
 });
 
-export const saveRepositoryFile = mutation({
+export const saveProjectFile = mutation({
   args: {
-    threadId: v.id("threads"),
-    repositoryFullName: v.string(),
-    branch: v.string(),
-    file: repositoryFileValidator,
+    projectId: v.id("projects"),
+    file: projectFileValidator,
   },
   handler: async (ctx, args) => {
-    await requireOwnedThread(ctx, args.threadId);
+    const project = await requireOwnedProject(ctx, args.projectId);
 
     const existingFile = await ctx.db
-      .query("repositoryFiles")
-      .withIndex("by_thread_and_branch_and_path", (q) =>
-        q
-          .eq("threadId", args.threadId)
-          .eq("branch", args.branch)
-          .eq("path", args.file.path)
+      .query("projectFiles")
+      .withIndex("by_project_and_path", (q) =>
+        q.eq("projectId", args.projectId).eq("path", args.file.path)
       )
       .unique();
 
     const updatedAt = Date.now();
     const nextFile = {
-      threadId: args.threadId,
-      repositoryFullName: args.repositoryFullName,
-      branch: args.branch,
+      projectId: args.projectId,
       path: args.file.path,
       content: args.file.content,
       language: args.file.language,
@@ -236,10 +262,10 @@ export const saveRepositoryFile = mutation({
     if (existingFile) {
       await ctx.db.replace(existingFile._id, nextFile);
     } else {
-      await ctx.db.insert("repositoryFiles", nextFile);
+      await ctx.db.insert("projectFiles", nextFile);
     }
 
-    await ctx.db.patch(args.threadId, { updatedAt });
+    await ctx.db.patch(project._id, { updatedAt });
   },
 });
 

@@ -36,6 +36,13 @@ type GithubBranch = {
   sha: string;
 };
 
+export type ExistingProject = {
+  _id: string;
+  name: string;
+  repositoryFullName: string;
+  branch: string;
+};
+
 async function fetchBranches(repoFullName: string): Promise<GithubBranch[]> {
   const response = await fetch("/api/github", {
     method: "POST",
@@ -51,11 +58,14 @@ interface NewThreadDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   repos: GithubRepository[];
+  projects: ExistingProject[];
   isLoadingRepos: boolean;
+  isLoadingProjects: boolean;
   repoError: string | null;
   githubUser: string | null;
   onRefreshRepos: () => void;
   onCreateWithExisting: (repoFullName: string, branch: string) => Promise<void>;
+  onCreateWithProject: (projectId: string) => Promise<void>;
   onCreateWithNew: (repoName: string, description: string, isPrivate: boolean) => Promise<void>;
 }
 
@@ -63,14 +73,17 @@ export function NewThreadDialog({
   open,
   onOpenChange,
   repos,
+  projects,
   isLoadingRepos,
+  isLoadingProjects,
   repoError,
   githubUser,
   onRefreshRepos,
   onCreateWithExisting,
+  onCreateWithProject,
   onCreateWithNew,
 }: NewThreadDialogProps) {
-  const [mode, setMode] = useState<"existing" | "new">("existing");
+  const [mode, setMode] = useState<"existing" | "projects" | "new">("existing");
 
   // Existing repo state
   const [repoSearch, setRepoSearch] = useState("");
@@ -79,6 +92,8 @@ export function NewThreadDialog({
   const [selectedBranch, setSelectedBranch] = useState("");
   const [isLoadingBranches, setIsLoadingBranches] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
+  const [projectSearch, setProjectSearch] = useState("");
+  const [selectedProjectId, setSelectedProjectId] = useState<string>("");
 
   // New repo state
   const [newRepoName, setNewRepoName] = useState("");
@@ -97,6 +112,8 @@ export function NewThreadDialog({
     setBranches([]);
     setSelectedBranch("");
     setBranchError(null);
+    setProjectSearch("");
+    setSelectedProjectId("");
     setNewRepoName("");
     setNewRepoDescription("");
     setNewRepoPrivate(false);
@@ -139,6 +156,13 @@ export function NewThreadDialog({
   const filteredRepos = repos.filter((r) =>
     r.fullName.toLowerCase().includes(repoSearch.toLowerCase())
   );
+  const filteredProjects = projects.filter((project) => {
+    const query = projectSearch.toLowerCase();
+    return (
+      project.name.toLowerCase().includes(query) ||
+      project.repositoryFullName.toLowerCase().includes(query)
+    );
+  });
 
   const handleExistingSubmit = async () => {
     if (!selectedRepo || !selectedBranch) return;
@@ -157,6 +181,17 @@ export function NewThreadDialog({
     setIsSubmitting(true);
     try {
       await onCreateWithNew(name, newRepoDescription.trim(), newRepoPrivate);
+      onOpenChange(false);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleProjectSubmit = async () => {
+    if (!selectedProjectId) return;
+    setIsSubmitting(true);
+    try {
+      await onCreateWithProject(selectedProjectId);
       onOpenChange(false);
     } finally {
       setIsSubmitting(false);
@@ -194,10 +229,13 @@ export function NewThreadDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <Tabs value={mode} onValueChange={(v) => setMode(v as "existing" | "new")}>
+        <Tabs value={mode} onValueChange={(v) => setMode(v as "existing" | "projects" | "new")}>
           <TabsList className="w-full">
             <TabsTrigger value="existing" className="flex-1 text-[13px]">
-              Existing repository
+              GitHub repo
+            </TabsTrigger>
+            <TabsTrigger value="projects" className="flex-1 text-[13px]">
+              Existing project
             </TabsTrigger>
             <TabsTrigger value="new" className="flex-1 text-[13px]">
               New repository
@@ -334,6 +372,76 @@ export function NewThreadDialog({
                 type="button"
                 onClick={() => void handleExistingSubmit()}
                 disabled={!selectedRepo || !selectedBranch || isSubmitting || isLoadingBranches}
+              >
+                {isSubmitting ? "Creating…" : "Start thread"}
+              </Button>
+            </DialogFooter>
+          </TabsContent>
+
+          <TabsContent value="projects" className="mt-4 space-y-4">
+            <div className="space-y-2">
+              <div className="relative">
+                <SearchIcon
+                  size={14}
+                  className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+                />
+                <Input
+                  placeholder="Search projects…"
+                  value={projectSearch}
+                  onChange={(e) => setProjectSearch(e.target.value)}
+                  className="pl-8 text-[13px]"
+                />
+              </div>
+              <div className="px-0.5 text-[11px] text-muted-foreground">
+                {isLoadingProjects
+                  ? "Loading projects…"
+                  : `${projects.length} project${projects.length === 1 ? "" : "s"}`}
+              </div>
+            </div>
+
+            <ScrollArea className="h-52 rounded-md border bg-muted/20">
+              {isLoadingProjects ? (
+                <div className="flex h-full items-center justify-center p-8 text-[13px] text-muted-foreground">
+                  Loading projects…
+                </div>
+              ) : filteredProjects.length === 0 ? (
+                <div className="flex h-full items-center justify-center p-8 text-center text-[13px] text-muted-foreground">
+                  {projects.length === 0
+                    ? "No projects yet. Sync a GitHub repository first."
+                    : "No projects match your search."}
+                </div>
+              ) : (
+                <div className="p-1">
+                  {filteredProjects.map((project) => (
+                    <button
+                      key={project._id}
+                      type="button"
+                      onClick={() => setSelectedProjectId(project._id)}
+                      className={[
+                        "flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left text-[13px] transition-colors hover:bg-muted",
+                        selectedProjectId === project._id
+                          ? "bg-muted font-medium"
+                          : "text-foreground/90",
+                      ].join(" ")}
+                    >
+                      <span className="truncate">{project.name}</span>
+                      <span className="truncate text-[11px] text-muted-foreground">
+                        {project.repositoryFullName} · {project.branch}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </ScrollArea>
+
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void handleProjectSubmit()}
+                disabled={!selectedProjectId || isSubmitting}
               >
                 {isSubmitting ? "Creating…" : "Start thread"}
               </Button>
