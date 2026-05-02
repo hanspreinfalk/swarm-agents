@@ -140,6 +140,7 @@ export function AppSidebar({
   const displayName =
     user?.fullName?.trim() ||
     [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim() ||
+    user?.username?.trim() ||
     user?.primaryEmailAddress?.emailAddress ||
     "Account";
 

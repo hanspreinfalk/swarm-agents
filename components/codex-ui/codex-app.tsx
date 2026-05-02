@@ -53,6 +53,7 @@ import { AppSidebar } from "./app-sidebar";
 import { ChatPanel } from "./chat-panel";
 import { CommitDialog } from "./commit-dialog";
 import { CodePanel } from "./code-panel";
+import { NewThreadDialog } from "./new-thread-dialog";
 import { CODE_FILES } from "./data";
 import type { AssistantMessage, ChatMessage, CodeFile, UserMessage } from "./types";
 import {
@@ -237,13 +238,16 @@ export function CodexApp() {
   }));
   const [emptyFolders, setEmptyFolders] = useState<Set<string>>(() => new Set());
   const [repositories, setRepositories] = useState<GithubRepository[]>([]);
+  const [githubUser, setGithubUser] = useState<string | null>(null);
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null);
   const [branches, setBranches] = useState<GithubBranch[]>([]);
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
   const [isLoadingRepos, setIsLoadingRepos] = useState(false);
+  const [repoError, setRepoError] = useState<string | null>(null);
   const [isLoadingBranches, setIsLoadingBranches] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isCommitting, setIsCommitting] = useState(false);
+  const [newThreadDialogOpen, setNewThreadDialogOpen] = useState(false);
   const saveTimersRef = useRef<Record<string, number>>({});
 
   const handleCodeFileChange = useCallback(
@@ -488,32 +492,36 @@ export function CodexApp() {
   );
   const repositoryFiles = repositoryFilesQuery ?? [];
 
-  useEffect(() => {
-    let cancelled = false;
-    queueMicrotask(() => {
-      if (!cancelled) setIsLoadingRepos(true);
-    });
-    postGithub<{ repositories: GithubRepository[] }>({ action: "listRepos" })
-      .then(({ repositories: nextRepositories }) => {
-        if (cancelled) return;
+  const loadRepos = useCallback(() => {
+    setIsLoadingRepos(true);
+    setRepoError(null);
+    postGithub<{ authenticatedAs: string; hasRepoScope: boolean; repositories: GithubRepository[] }>({ action: "listRepos" })
+      .then(({ authenticatedAs, hasRepoScope, repositories: nextRepositories }) => {
+        setGithubUser(authenticatedAs);
+        if (!hasRepoScope && nextRepositories.length === 0) {
+          setRepoError(
+            `@${authenticatedAs} is connected but the GitHub token is missing the "repo" scope. ` +
+            `Go to your Clerk Dashboard → Configure → GitHub → add "repo" to Scopes, then re-login.`
+          );
+        }
         setRepositories(nextRepositories);
-        setSelectedRepo((current) => {
-          if (current) return current;
-          return nextRepositories[0]?.fullName ?? null;
-        });
       })
       .catch((error) => {
-        if (!cancelled) {
-          toast.error(error instanceof Error ? error.message : "Could not load GitHub repositories.");
-        }
+        const msg = error instanceof Error ? error.message : "Could not load GitHub repositories.";
+        setRepoError(msg);
+        toast.error(msg);
       })
       .finally(() => {
-        if (!cancelled) setIsLoadingRepos(false);
+        setIsLoadingRepos(false);
       });
-    return () => {
-      cancelled = true;
-    };
   }, []);
+
+  // Load repos lazily when the new-thread dialog opens
+  useEffect(() => {
+    if (newThreadDialogOpen) {
+      loadRepos();
+    }
+  }, [newThreadDialogOpen, loadRepos]);
 
   useEffect(() => {
     if (!selectedRepo) return;
@@ -870,22 +878,53 @@ export function CodexApp() {
   ];
 
   // ── Thread management ────────────────────────────────────────────
-  const handleNewThread = useCallback(async () => {
-    if (!selectedRepo || !selectedBranch) {
-      toast.error("Choose a GitHub repository first.");
-      return;
-    }
-    const threadId = await createThreadMutation({
-      title: "New thread",
-      model: selectedModel,
-      repositoryFullName: selectedRepo,
-      branch: selectedBranch,
-    });
-    setActiveThreadId(threadId);
-    setStreamingContent("");
-    setCodeFiles({});
-    setActiveFile("");
-  }, [createThreadMutation, selectedBranch, selectedModel, selectedRepo]);
+  const handleNewThread = useCallback(() => {
+    setNewThreadDialogOpen(true);
+  }, []);
+
+  const handleCreateThreadWithRepo = useCallback(
+    async (repoFullName: string, branch: string) => {
+      const threadId = await createThreadMutation({
+        title: "New thread",
+        model: selectedModel,
+        repositoryFullName: repoFullName,
+        branch,
+      });
+      setActiveThreadId(threadId);
+      setSelectedRepo(repoFullName);
+      setSelectedBranch(branch);
+      setStreamingContent("");
+      setCodeFiles({});
+      setActiveFile("");
+    },
+    [createThreadMutation, selectedModel]
+  );
+
+  const handleCreateThreadWithNewRepo = useCallback(
+    async (repoName: string, description: string, isPrivate: boolean) => {
+      const newRepo = await postGithub<GithubRepository>({
+        action: "createRepo",
+        repoName,
+        description: description || undefined,
+        isPrivate,
+      });
+      setRepositories((prev) => [newRepo, ...prev]);
+      const threadId = await createThreadMutation({
+        title: repoName,
+        model: selectedModel,
+        repositoryFullName: newRepo.fullName,
+        branch: newRepo.defaultBranch,
+      });
+      setActiveThreadId(threadId);
+      setSelectedRepo(newRepo.fullName);
+      setSelectedBranch(newRepo.defaultBranch);
+      setStreamingContent("");
+      setCodeFiles({});
+      setActiveFile("");
+      toast.success(`Created repository ${newRepo.fullName}`);
+    },
+    [createThreadMutation, selectedModel]
+  );
 
   const handleSelectThread = useCallback((id: string) => {
     setActiveThreadId(id);
@@ -1215,103 +1254,128 @@ export function CodexApp() {
               <span className="font-semibold text-foreground">
                 {activeThread?.title ?? "SwarmAgents"}
               </span>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
+              {selectedRepo && (
+                <span className="inline-flex max-w-[180px] items-center gap-1.5 truncate rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                  <svg
+                    viewBox="0 0 16 16"
+                    width={12}
+                    height={12}
+                    fill="currentColor"
+                    aria-hidden="true"
+                    className="shrink-0"
+                  >
+                    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+                  </svg>
+                  <span className="truncate">{selectedRepo}</span>
+                </span>
+              )}
+
+              {selectedRepo && (
+                <>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        className="hidden items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground sm:inline-flex"
+                      >
+                        <GitBranchIcon size={12} />
+                        {selectedBranch ?? (isLoadingBranches ? "Loading..." : "Select branch")}
+                        <ChevronDownIcon size={11} />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent className="w-52">
+                      <DropdownMenuLabel>Branches</DropdownMenuLabel>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuRadioGroup
+                        value={selectedBranch ?? ""}
+                        onValueChange={handleSelectBranch}
+                      >
+                        {branches.map((branch) => (
+                          <DropdownMenuRadioItem key={branch.name} value={branch.name}>
+                            <span className="truncate">{branch.name}</span>
+                          </DropdownMenuRadioItem>
+                        ))}
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+
                   <button
                     type="button"
-                    className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+                    onClick={() => setNewBranchDialogOpen(true)}
+                    disabled={!selectedBranch}
+                    className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    GitHub · {selectedRepo ?? (isLoadingRepos ? "Loading..." : "Select repo")}
-                    <ChevronDownIcon size={11} />
+                    <GitBranchPlusIcon size={12} />
+                    New branch
                   </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent className="w-64">
-                  <DropdownMenuLabel>Repositories</DropdownMenuLabel>
-                  <DropdownMenuRadioGroup
-                    value={selectedRepo ?? ""}
-                    onValueChange={handleSelectRepository}
-                  >
-                    {repositories.map((repo) => (
-                      <DropdownMenuRadioItem key={repo.fullName} value={repo.fullName}>
-                        <span className="truncate">{repo.fullName}</span>
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
 
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
                   <button
                     type="button"
-                    className="hidden items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground sm:inline-flex"
+                    onClick={handleSyncRepository}
+                    disabled={!selectedBranch || isSyncing}
+                    className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    <GitBranchIcon size={12} />
-                    {selectedBranch ?? (isLoadingBranches ? "Loading..." : "Select branch")}
-                    <ChevronDownIcon size={11} />
+                    <RefreshCwIcon
+                      className={isSyncing ? "animate-spin" : undefined}
+                      size={12}
+                    />
+                    {isSyncing ? "Syncing" : "Sync"}
                   </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent className="w-52">
-                  <DropdownMenuLabel>Branches</DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuRadioGroup
-                    value={selectedBranch ?? ""}
-                    onValueChange={handleSelectBranch}
-                  >
-                    {branches.map((branch) => (
-                      <DropdownMenuRadioItem key={branch.name} value={branch.name}>
-                        <span className="truncate">{branch.name}</span>
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
-
-              <button
-                type="button"
-                onClick={() => setNewBranchDialogOpen(true)}
-                disabled={!selectedRepo || !selectedBranch}
-                className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <GitBranchPlusIcon size={12} />
-                New branch
-              </button>
-
-              <button
-                type="button"
-                onClick={handleSyncRepository}
-                disabled={!selectedRepo || !selectedBranch || isSyncing}
-                className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <RefreshCwIcon
-                  className={isSyncing ? "animate-spin" : undefined}
-                  size={12}
-                />
-                {isSyncing ? "Syncing" : "Sync"}
-              </button>
+                </>
+              )}
             </div>
-            <div className="ml-auto flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleOpenRepository}
-                disabled={!selectedRepo}
-                className="rounded-md px-3 py-1.5 text-[13px] font-medium text-foreground ring-1 ring-border transition-colors hover:bg-muted"
-              >
-                Open
-              </button>
-              <button
-                type="button"
-                onClick={() => setCommitDialogOpen(true)}
-                disabled={!selectedRepo || !selectedBranch || Object.keys(codeFiles).length === 0}
-                className="rounded-md bg-foreground px-3 py-1.5 text-[13px] font-medium text-background transition-colors hover:opacity-85 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Commit
-              </button>
-            </div>
+            {selectedRepo && (
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleOpenRepository}
+                  className="rounded-md px-3 py-1.5 text-[13px] font-medium text-foreground ring-1 ring-border transition-colors hover:bg-muted"
+                >
+                  Open
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCommitDialogOpen(true)}
+                  disabled={!selectedBranch || Object.keys(codeFiles).length === 0}
+                  className="rounded-md bg-foreground px-3 py-1.5 text-[13px] font-medium text-background transition-colors hover:opacity-85 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Commit
+                </button>
+              </div>
+            )}
           </header>
 
+          {/* ── Empty state: no repo selected ─────────────────────── */}
+          {!selectedRepo && (
+            <div className="flex h-full flex-col items-center justify-center gap-6 bg-background">
+              <img
+                src="/logo.svg"
+                alt="SwarmAgents"
+                width={72}
+                height={72}
+                className="opacity-90"
+              />
+              <div className="text-center">
+                <h2 className="text-xl font-semibold tracking-tight text-foreground">
+                  SwarmAgents
+                </h2>
+                <p className="mt-1.5 max-w-xs text-[13px] text-muted-foreground">
+                  Create a new thread and connect a GitHub repository to get started.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleNewThread}
+                className="inline-flex items-center gap-2 rounded-md bg-foreground px-4 py-2 text-[13px] font-medium text-background transition-opacity hover:opacity-85"
+              >
+                <PlusIcon size={14} />
+                New thread
+              </button>
+            </div>
+          )}
+
           {/* ── Resizable: Chat | Code panel ──────────────────────── */}
-          <div
+          {selectedRepo && <div
             ref={splitContainerRef}
             style={{
               display: "grid",
@@ -1463,7 +1527,7 @@ export function CodexApp() {
                 </>
               )}
             </div>
-          </div>
+          </div>}
         </SidebarInset>
       </SidebarProvider>
       <Dialog open={newBranchDialogOpen} onOpenChange={handleNewBranchDialogOpenChange}>
@@ -1508,6 +1572,18 @@ export function CodexApp() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <NewThreadDialog
+        open={newThreadDialogOpen}
+        onOpenChange={setNewThreadDialogOpen}
+        repos={repositories}
+        isLoadingRepos={isLoadingRepos}
+        repoError={repoError}
+        githubUser={githubUser}
+        onRefreshRepos={loadRepos}
+        onCreateWithExisting={handleCreateThreadWithRepo}
+        onCreateWithNew={handleCreateThreadWithNewRepo}
+      />
 
       <CommitDialog
         branch={selectedBranch}

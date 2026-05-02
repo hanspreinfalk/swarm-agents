@@ -1,3 +1,5 @@
+import { auth, clerkClient } from "@clerk/nextjs/server";
+
 type GithubRepoResponse = {
   full_name: string;
   default_branch: string;
@@ -46,6 +48,13 @@ type GithubTreeCreateResponse = {
   sha: string;
 };
 
+type GithubCreateRepoRequest = {
+  name: string;
+  description?: string;
+  private?: boolean;
+  auto_init?: boolean;
+};
+
 type GithubFile = {
   path: string;
   content: string;
@@ -74,8 +83,23 @@ const TEXT_EXTENSIONS = new Set([
   ".yaml",
 ]);
 
-function getGithubToken() {
-  return process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.GITHUB_PAT;
+async function getGithubToken(): Promise<string> {
+  // Prefer the GitHub OAuth token from the signed-in Clerk user
+  const { userId } = await auth();
+  if (userId) {
+    const client = await clerkClient();
+    const { data } = await client.users.getUserOauthAccessToken(userId, "github");
+    const token = data[0]?.token;
+    if (token) return token;
+  }
+
+  // Fall back to a server-side env var (useful for testing / server jobs)
+  const envToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.GITHUB_PAT;
+  if (envToken) return envToken;
+
+  throw new Error(
+    "No GitHub access token found. Please sign in with GitHub or set GITHUB_TOKEN."
+  );
 }
 
 function parseRepo(fullName: string) {
@@ -86,16 +110,8 @@ function parseRepo(fullName: string) {
   return { owner, repo };
 }
 
-function assertToken() {
-  const token = getGithubToken();
-  if (!token) {
-    throw new Error("Missing GITHUB_TOKEN, GH_TOKEN, or GITHUB_PAT.");
-  }
-  return token;
-}
-
 async function githubRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = assertToken();
+  const token = await getGithubToken();
   const response = await fetch(`https://api.github.com${path}`, {
     ...init,
     headers: {
@@ -107,16 +123,31 @@ async function githubRequest<T>(path: string, init: RequestInit = {}): Promise<T
     },
   });
 
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`GitHub request failed (${response.status}): ${detail}`);
-  }
-
   if (response.status === 204) {
     return undefined as T;
   }
 
-  return (await response.json()) as T;
+  const data = await response.json() as unknown;
+
+  if (!response.ok) {
+    const msg = (data as { message?: string })?.message ?? response.statusText;
+    throw new Error(`GitHub API error (${response.status}): ${msg}`);
+  }
+
+  // Guard: if GitHub returns an error object with status 200 (rare edge case)
+  if (
+    data !== null &&
+    typeof data === "object" &&
+    !Array.isArray(data) &&
+    typeof (data as { message?: string }).message === "string"
+  ) {
+    const errMsg = (data as { message: string }).message;
+    if (errMsg.toLowerCase().includes("bad credentials") || errMsg.toLowerCase().includes("requires authentication")) {
+      throw new Error(`GitHub authentication error: ${errMsg}`);
+    }
+  }
+
+  return data as T;
 }
 
 function extensionForPath(path: string) {
@@ -148,16 +179,69 @@ function encodeBranchRef(branch: string) {
 }
 
 async function listRepos() {
-  const repos = await githubRequest<GithubRepoResponse[]>(
-    "/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member"
-  );
+  const token = await getGithubToken();
 
-  return repos.map((repo) => ({
+  // Fetch user info and check scopes in parallel
+  const userResponse = await fetch("https://api.github.com/user", {
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+
+  const userData = await userResponse.json() as { login: string; public_repos?: number };
+  if (!userResponse.ok) {
+    const msg = (userData as unknown as { message?: string })?.message ?? userResponse.statusText;
+    throw new Error(`GitHub API error (${userResponse.status}): ${msg}`);
+  }
+
+  // GitHub returns granted scopes in the X-OAuth-Scopes header
+  const grantedScopes = userResponse.headers.get("x-oauth-scopes") ?? "";
+  const hasRepoScope = grantedScopes.split(",").map((s) => s.trim()).some((s) => s === "repo");
+
+  // Fetch repos — works with any scope; private repos require `repo` scope
+  const allRepos: GithubRepoResponse[] = [];
+  let page = 1;
+  while (true) {
+    const batch = await githubRequest<GithubRepoResponse[]>(
+      `/user/repos?per_page=100&page=${page}&sort=pushed&affiliation=owner,collaborator,organization_member`
+    );
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    allRepos.push(...batch);
+    if (batch.length < 100) break;
+    page++;
+  }
+
+  return {
+    authenticatedAs: userData.login,
+    hasRepoScope,
+    repositories: allRepos.map((repo) => ({
+      fullName: repo.full_name,
+      defaultBranch: repo.default_branch,
+      htmlUrl: repo.html_url,
+      private: repo.private,
+    })),
+  };
+}
+
+async function createRepo(name: string, description?: string, isPrivate = false) {
+  const repo = await githubRequest<GithubRepoResponse>("/user/repos", {
+    method: "POST",
+    body: JSON.stringify({
+      name,
+      ...(description ? { description } : {}),
+      private: isPrivate,
+      auto_init: true,
+    } satisfies GithubCreateRepoRequest),
+  });
+
+  return {
     fullName: repo.full_name,
     defaultBranch: repo.default_branch,
     htmlUrl: repo.html_url,
     private: repo.private,
-  }));
+  };
 }
 
 async function listBranches(repositoryFullName: string) {
@@ -306,17 +390,30 @@ async function commitFiles(
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as {
-      action: "listRepos" | "listBranches" | "sync" | "createBranch" | "commit";
+      action: "listRepos" | "listBranches" | "sync" | "createBranch" | "commit" | "createRepo";
       repositoryFullName?: string;
       branch?: string;
       sourceBranch?: string;
       newBranch?: string;
       message?: string;
       files?: GithubFile[];
+      repoName?: string;
+      description?: string;
+      isPrivate?: boolean;
     };
 
     if (body.action === "listRepos") {
-      return Response.json({ repositories: await listRepos() });
+      const result = await listRepos();
+      return Response.json(result);
+    }
+
+    if (body.action === "createRepo") {
+      if (!body.repoName) {
+        return Response.json({ error: "repoName is required." }, { status: 400 });
+      }
+      return Response.json(
+        await createRepo(body.repoName, body.description, body.isPrivate ?? false)
+      );
     }
 
     if (!body.repositoryFullName) {
